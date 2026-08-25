@@ -35,7 +35,9 @@ def test_pubsub_push_duplicate_is_claimed_once(monkeypatch, service) -> None:
     client = TestClient(main.app)
     incident = client.post("/api/demo/seed").json()
     body = base64.b64encode(
-        json.dumps({"event_id": "pubsub-duplicate-1", "incident_id": incident["incident_id"]}).encode()
+        json.dumps(
+            {"event_id": "pubsub-duplicate-1", "incident_id": incident["incident_id"]}
+        ).encode()
     ).decode()
     payload = {"message": {"messageId": "message-1", "data": body}}
     before = len(client.get(f"/api/incidents/{incident['incident_id']}").json()["timeline"])

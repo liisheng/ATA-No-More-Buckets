@@ -13,6 +13,55 @@ export type TimelineEntry = {
   metadata: Record<string, unknown>;
 };
 
+export type ReportAssessment = {
+  voice_transcript?: string;
+  facts: {
+    issue_type: string;
+    severity: string;
+    water_visible: boolean;
+    water_source?: string;
+    electrical_hazard: boolean;
+    structural_hazard: boolean;
+    occupant_danger: boolean;
+    access_available: boolean;
+    estimated_cost?: number;
+    affected_rooms: string[];
+    observed_text: string;
+    evidence_refs: string[];
+    source_confidence: number;
+    uncertainties: string[];
+  };
+  conflicts: string[];
+  missing_information: string[];
+  confidence: number;
+};
+
+export type CommunicationRecord = {
+  communication_id: string;
+  incident_id: string;
+  sender_role: "tenant" | "agent" | "vendor" | "scheduler" | "system";
+  sender_id: string;
+  recipient_role: "tenant" | "agent" | "vendor" | "scheduler" | "system";
+  recipient_id: string;
+  channel: string;
+  direction: "inbound" | "outbound";
+  message_type: "text" | "image" | "audio" | "button" | "invoice" | "system";
+  text: string;
+  media_ids: string[];
+  provider_message_id?: string;
+  delivery_status: "received" | "sent" | "delivered" | "failed" | "simulated" | "deduplicated";
+  timestamp: string;
+};
+
+export type MediaDescriptor = {
+  media_id: string;
+  filename: string;
+  mime_type: string;
+  size_bytes: number;
+  source: "tenant" | "vendor" | "system";
+  url: string;
+};
+
 export type Incident = {
   incident_id: string;
   property_id: string;
@@ -21,6 +70,7 @@ export type Incident = {
   report_text: string;
   voice_transcript?: string;
   media_ids: string[];
+  report_assessment?: ReportAssessment;
   facts?: {
     issue_type: string;
     severity: string;
@@ -32,11 +82,14 @@ export type Incident = {
   };
   containment_instructions?: string;
   assigned_vendor_id?: string;
+  vendor_attempts: { vendor_id: string; outcome: string; attempt_id: string; event_id: string; at: string; deadline_at?: string }[];
   eta?: string;
   work_order?: { estimated_cost: number; spending_limit: number; currency: string; status: string };
   approval?: { status: string; requested_amount: number; limit: number };
   last_evidence?: { passed: boolean; blocking_reasons: string[]; photo_confidence: number; invoice_total?: number };
   warranty_expires_at?: string;
+  created_at: string;
+  updated_at: string;
   timeline: TimelineEntry[];
 };
 
@@ -61,9 +114,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   runtime: () => request<RuntimeMetadata>("/api/runtime"),
+  incidents: () => request<Incident[]>("/api/incidents"),
   seed: () => request<Incident>("/api/demo/seed", { method: "POST" }),
   report: (report: Record<string, unknown>) => request<Incident>("/api/incidents", { method: "POST", body: JSON.stringify(report) }),
   incident: (id: string) => request<Incident>(`/api/incidents/${id}`),
+  communications: (id: string) => request<CommunicationRecord[]>(`/api/incidents/${id}/communications`),
+  media: (id: string) => request<MediaDescriptor[]>(`/api/incidents/${id}/media`),
   action: (id: string, action: string, payload: Record<string, unknown> = {}) =>
     request<Incident>(`/api/incidents/${id}/actions`, {
       method: "POST",

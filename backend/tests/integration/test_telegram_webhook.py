@@ -2,7 +2,12 @@ from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
 from app import main
-from app.adapters import LocalDemoVendorAdapter, TelegramBotAdapter, build_demo_media
+from app.adapters import (
+    LocalDemoVendorAdapter,
+    TelegramBotAdapter,
+    build_demo_media,
+    build_demo_voice_media,
+)
 from app.config import Settings
 
 
@@ -14,14 +19,19 @@ def test_telegram_secret_start_and_duplicate_are_idempotent(monkeypatch, service
         "update_id": 1001,
         "message": {"chat": {"id": 100000000001}, "text": "/start"},
     }
-    assert client.post(
+    assert (
+        client.post(
+            "/api/webhooks/telegram",
+            json=update,
+            headers={"X-Telegram-Bot-Api-Secret-Token": "demo-webhook-secret"},
+        ).status_code
+        == 200
+    )
+    assert "100000000001" in service.started_telegram_chats
+    duplicate = client.post(
         "/api/webhooks/telegram",
         json=update,
         headers={"X-Telegram-Bot-Api-Secret-Token": "demo-webhook-secret"},
-    ).status_code == 200
-    assert "100000000001" in service.started_telegram_chats
-    duplicate = client.post(
-        "/api/webhooks/telegram", json=update, headers={"X-Telegram-Bot-Api-Secret-Token": "demo-webhook-secret"}
     )
     assert duplicate.status_code == 200
     assert duplicate.json()["status"] == "duplicate"
@@ -86,24 +96,64 @@ def test_telegram_photo_voice_intake_and_callback_query(monkeypatch, service) ->
     service.notifications = TelegramBotAdapter(
         Settings(_env_file=None, telegram_bot_token=SecretStr("synthetic-token"))
     )
-    service.notifications.download_media = lambda file_id, **kwargs: build_demo_media(file_id)  # type: ignore[method-assign]
+    service.notifications.send = lambda message: f"telegram:{message.action_key}"  # type: ignore[method-assign]
+    service.notifications.download_media = lambda file_id, **kwargs: (  # type: ignore[method-assign]
+        build_demo_voice_media(file_id)
+        if kwargs.get("mime_type", "").startswith("audio/")
+        else build_demo_media(file_id)
+    )
     service.notifications.answer_callback = lambda callback_id: None  # type: ignore[method-assign]
+    service.started_telegram_chats.add("7003")
     client = TestClient(main.app)
+    start = client.post(
+        "/api/webhooks/telegram",
+        json={"update_id": 1200, "message": {"chat": {"id": 7003}, "text": "/start"}},
+        headers={"X-Telegram-Bot-Api-Secret-Token": "demo-webhook-secret"},
+    )
+    assert start.status_code == 200
+    report_start = client.post(
+        "/api/webhooks/telegram",
+        json={"update_id": 1201, "message": {"chat": {"id": 7003}, "text": "/report"}},
+        headers={"X-Telegram-Bot-Api-Secret-Token": "demo-webhook-secret"},
+    )
+    assert report_start.json()["kind"] == "draft_started"
     report = client.post(
         "/api/webhooks/telegram",
         json={
-            "update_id": 1201,
+            "update_id": 1202,
             "message": {
                 "chat": {"id": 7003},
                 "text": "Water is dripping under the sink",
                 "photo": [{"file_id": "photo-file"}],
-                "voice": {"file_id": "voice-file"},
             },
         },
         headers={"X-Telegram-Bot-Api-Secret-Token": "demo-webhook-secret"},
     )
     assert report.status_code == 200
-    assert report.json()["kind"] == "tenant_report"
+    assert report.json()["kind"] == "draft_update"
+    voice = client.post(
+        "/api/webhooks/telegram",
+        json={
+            "update_id": 1203,
+            "message": {"chat": {"id": 7003}, "voice": {"file_id": "voice-file"}},
+        },
+        headers={"X-Telegram-Bot-Api-Secret-Token": "demo-webhook-secret"},
+    )
+    assert voice.json()["kind"] == "draft_update"
+    draft = service.repository.list_drafts("7003")[0]
+    submit = client.post(
+        "/api/webhooks/telegram",
+        json={
+            "update_id": 1204,
+            "callback_query": {
+                "id": "draft-submit",
+                "data": f"draft:{draft.draft_id}:submit",
+                "message": {"chat": {"id": 7003}},
+            },
+        },
+        headers={"X-Telegram-Bot-Api-Secret-Token": "demo-webhook-secret"},
+    )
+    assert submit.json()["kind"] == "draft_submitted"
     incident = service.list_incidents()[0]
     assert len(incident.media_ids) == 2
     assert incident.status.value == "DISPATCHING"
@@ -111,7 +161,7 @@ def test_telegram_photo_voice_intake_and_callback_query(monkeypatch, service) ->
     callback = client.post(
         "/api/webhooks/telegram",
         json={
-            "update_id": 1202,
+            "update_id": 1205,
             "callback_query": {
                 "id": "callback-1",
                 "data": f"vendor:{incident.incident_id}:accept",
@@ -124,3 +174,25 @@ def test_telegram_photo_voice_intake_and_callback_query(monkeypatch, service) ->
     assert callback.json()["kind"] == "vendor_callback"
     current = service.get_incident(incident.incident_id)
     assert current.assigned_vendor_id == "vendor-a"
+    contacts = service.list_communications(incident.incident_id)
+    assert any(
+        contact.sender_role == "vendor"
+        and contact.message_type == "button"
+        and contact.provider_message_id == "callback-1"
+        for contact in contacts
+    )
+    contact_count = len(contacts)
+    duplicate_callback = client.post(
+        "/api/webhooks/telegram",
+        json={
+            "update_id": 1205,
+            "callback_query": {
+                "id": "callback-1",
+                "data": f"vendor:{incident.incident_id}:accept",
+                "message": {"chat": {"id": "-100000000101"}},
+            },
+        },
+        headers={"X-Telegram-Bot-Api-Secret-Token": "demo-webhook-secret"},
+    )
+    assert duplicate_callback.json()["status"] == "duplicate"
+    assert len(service.list_communications(incident.incident_id)) == contact_count

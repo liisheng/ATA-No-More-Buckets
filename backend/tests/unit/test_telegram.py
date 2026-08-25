@@ -19,7 +19,10 @@ def test_default_config_is_telegram_sgd_250_and_exact_gemini_model() -> None:
     assert settings.spending_limit_default == 250
     assert settings.gemini_model == "gemini-3.5-flash"
     assert settings.google_genai_use_vertexai is False
-    assert (settings.urgent_vendor_timeout_seconds, settings.routine_vendor_timeout_seconds) == (8, 12)
+    assert (settings.urgent_vendor_timeout_seconds, settings.routine_vendor_timeout_seconds) == (
+        8,
+        12,
+    )
     assert settings.tenant_confirmation_delay_seconds == 15
     assert settings.demo_warranty_period_seconds == 30
 

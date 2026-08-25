@@ -33,12 +33,17 @@ class Settings(BaseSettings):
     pubsub_topic: str = "incident-events"
     tasks_queue: str = "incident-workflows"
 
-    telegram_bot_token: SecretStr | None = Field(default=None, validation_alias="TELEGRAM_BOT_TOKEN")
+    telegram_bot_token: SecretStr | None = Field(
+        default=None, validation_alias="TELEGRAM_BOT_TOKEN"
+    )
     telegram_webhook_secret: SecretStr | None = Field(
         default=None, validation_alias="TELEGRAM_WEBHOOK_SECRET"
     )
     telegram_bot_username: str | None = Field(
         default=None, validation_alias="TELEGRAM_BOT_USERNAME"
+    )
+    telegram_draft_expiry_seconds: int = Field(
+        default=900, validation_alias="TELEGRAM_DRAFT_EXPIRY_SECONDS"
     )
 
     # Twilio is retained as an optional adapter only; Telegram is the MVP path.
@@ -49,8 +54,12 @@ class Settings(BaseSettings):
     spending_limit_default: float = Field(default=250.0, validation_alias="SPENDING_LIMIT_DEFAULT")
     currency: str = Field(default="SGD", validation_alias="CURRENCY")
     warranty_days: int = 30
-    urgent_vendor_timeout_seconds: int = Field(default=8, validation_alias="URGENT_VENDOR_TIMEOUT_SECONDS")
-    routine_vendor_timeout_seconds: int = Field(default=12, validation_alias="ROUTINE_VENDOR_TIMEOUT_SECONDS")
+    urgent_vendor_timeout_seconds: int = Field(
+        default=8, validation_alias="URGENT_VENDOR_TIMEOUT_SECONDS"
+    )
+    routine_vendor_timeout_seconds: int = Field(
+        default=12, validation_alias="ROUTINE_VENDOR_TIMEOUT_SECONDS"
+    )
     tenant_confirmation_delay_seconds: int = Field(
         default=15, validation_alias="TENANT_CONFIRMATION_DELAY_SECONDS"
     )
@@ -71,8 +80,10 @@ class Settings(BaseSettings):
     @field_validator("telegram_bot_username")
     @classmethod
     def validate_telegram_username(cls, value: str | None) -> str | None:
-        if value is not None and value and (
-            value.startswith("@") or not re.fullmatch(r"[A-Za-z0-9_]{5,32}", value)
+        if (
+            value is not None
+            and value
+            and (value.startswith("@") or not re.fullmatch(r"[A-Za-z0-9_]{5,32}", value))
         ):
             raise ValueError("TELEGRAM_BOT_USERNAME must be a username without @")
         return value

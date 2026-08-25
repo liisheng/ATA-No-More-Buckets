@@ -84,9 +84,13 @@ def test_vendor_response_sla_recovers_from_pending_timeout(service, report_media
 def test_vendor_timeout_uses_urgent_demo_clock(service, report_media) -> None:
     service.vendors_adapter.vendor_a_behavior = "pending"
     incident = service.submit_report(
-        make_report(report_media, "Water is gushing rapidly under the kitchen sink.", "urgent-timeout")
+        make_report(
+            report_media, "Water is gushing rapidly under the kitchen sink.", "urgent-timeout"
+        )
     )
-    timeout = next(task for task in service.tasks.tasks.values() if task["type"] == "vendor_timeout")
+    timeout = next(
+        task for task in service.tasks.tasks.values() if task["type"] == "vendor_timeout"
+    )
     assert incident.facts and incident.facts.severity.value == "high"
     assert timeout["delay_seconds"] == 8
 
@@ -146,9 +150,15 @@ def test_over_limit_work_requires_approval_before_dispatch(service, report_media
     assert approved.assigned_vendor_id == "vendor-b"
 
 
-def test_explicit_approval_sets_authority_and_never_happens_for_safety(service, report_media) -> None:
+def test_explicit_approval_sets_authority_and_never_happens_for_safety(
+    service, report_media
+) -> None:
     over_limit = service.submit_report(
-        make_report(report_media, "Water is gushing under the sink; expected quote $1200.", "approval-amount")
+        make_report(
+            report_media,
+            "Water is gushing under the sink; expected quote $1200.",
+            "approval-amount",
+        )
     )
     approved = service.process_action(
         over_limit.incident_id,
@@ -164,7 +174,9 @@ def test_explicit_approval_sets_authority_and_never_happens_for_safety(service, 
     unsafe = service.submit_report(
         make_report(report_media, "Water is beside a sparking outlet; danger.", "safety-no-expand")
     )
-    ignored = service.process_action(unsafe.incident_id, ActionRequest(action="approve", event_id="unsafe-approval"))
+    ignored = service.process_action(
+        unsafe.incident_id, ActionRequest(action="approve", event_id="unsafe-approval")
+    )
     assert ignored.status == IncidentStatus.ESCALATED
     assert ignored.work_order is None
 
@@ -194,6 +206,8 @@ def test_warranty_recurrence_reopens_original_incident(
     incident = service.submit_report(make_report(report_media, key="warranty"))
     incident = complete(service, incident, completion_media)
     assert incident.status == IncidentStatus.PROVISIONALLY_RESOLVED
+    reminder = service.request_tenant_confirmation(incident.incident_id, "tenant-reminder-1")
+    assert reminder.status == IncidentStatus.PROVISIONALLY_RESOLVED
     incident = service.process_action(
         incident.incident_id, ActionRequest(action="tenant_confirm", event_id="confirm-1")
     )

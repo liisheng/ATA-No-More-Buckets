@@ -28,9 +28,7 @@ def test_registration_reads_config_and_verifies_the_webhook_without_network() ->
     fake = FakeTelegramAdapter()
     info = register_webhook(settings, "https://demo.run.app/", fake)  # type: ignore[arg-type]
     assert info["pending_update_count"] == 2
-    assert fake.set_calls == [
-        ("https://demo.run.app/api/webhooks/telegram", "synthetic-secret")
-    ]
+    assert fake.set_calls == [("https://demo.run.app/api/webhooks/telegram", "synthetic-secret")]
 
 
 def test_registration_rejects_a_mismatched_provider_url() -> None:

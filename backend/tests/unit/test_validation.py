@@ -4,12 +4,27 @@ import pytest
 from pydantic import ValidationError
 
 from app.adapters import validate_media_asset
-from app.models import MediaAsset, ObservableFacts
+from app.models import MediaAsset, ObservableFacts, ReportAssessment
 
 
 def test_observable_fact_schema_rejects_unknown_fields() -> None:
     with pytest.raises(ValidationError):
         ObservableFacts.model_validate({"issue_type": "leak", "not_authorization": True})
+
+
+def test_report_assessment_requires_structured_observations_and_rejects_policy_fields() -> None:
+    assessment = ReportAssessment.model_validate(
+        {
+            "voice_transcript": "I can reach the shutoff.",
+            "facts": {"issue_type": "leak", "source_confidence": 0.9},
+            "conflicts": [],
+            "missing_information": [],
+            "confidence": 0.9,
+        }
+    )
+    assert assessment.facts.issue_type.value == "leak"
+    with pytest.raises(ValidationError):
+        ReportAssessment.model_validate({**assessment.model_dump(), "authorized": True})
 
 
 def test_media_validation_rejects_unsupported_type_and_bad_digest() -> None:

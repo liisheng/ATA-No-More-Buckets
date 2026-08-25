@@ -24,9 +24,13 @@ class SafetyDecision:
 
 def evaluate_safety(facts: ObservableFacts) -> SafetyDecision:
     if facts.uncertainties:
-        return SafetyDecision(False, True, "FACTS_CONFLICT_OR_UNCERTAIN", "observable evidence is conflicting")
+        return SafetyDecision(
+            False, True, "FACTS_CONFLICT_OR_UNCERTAIN", "observable evidence is conflicting"
+        )
     if facts.source_confidence < 0.75:
-        return SafetyDecision(False, True, "FACTS_LOW_CONFIDENCE", "observable evidence confidence is low")
+        return SafetyDecision(
+            False, True, "FACTS_LOW_CONFIDENCE", "observable evidence confidence is low"
+        )
     if facts.occupant_danger:
         return SafetyDecision(False, True, "SAFETY_OCCUPANT_DANGER", "occupant danger reported")
     if facts.electrical_hazard:
@@ -133,9 +137,7 @@ def assess_completion(
         (work_order.authorized_amount or work_order.spending_limit) if work_order else 0
     )
     within_spending_limit = (
-        invoice_total is not None
-        and work_order is not None
-        and invoice_total <= authorized_amount
+        invoice_total is not None and work_order is not None and invoice_total <= authorized_amount
     )
     if invoice_present and not within_spending_limit:
         blocking_reasons.append("invoice exceeds approved spending limit")

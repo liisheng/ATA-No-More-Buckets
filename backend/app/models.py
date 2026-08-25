@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from enum import StrEnum
 from typing import Any, Literal
+from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -95,6 +96,46 @@ class ObservableFacts(StrictModel):
     uncertainties: list[str] = Field(default_factory=list, max_length=10)
 
 
+class ReportAssessment(StrictModel):
+    """Schema-validated multimodal observations; policy remains deterministic code."""
+
+    voice_transcript: str | None = Field(default=None, max_length=4000)
+    facts: ObservableFacts
+    conflicts: list[str] = Field(default_factory=list, max_length=20)
+    missing_information: list[str] = Field(default_factory=list, max_length=20)
+    confidence: float = Field(default=0.0, ge=0, le=1)
+
+
+class CommunicationRecord(StrictModel):
+    """A persisted contact record, including simulated contacts in demo mode."""
+
+    communication_id: str = Field(default_factory=lambda: f"comm_{uuid4().hex[:16]}")
+    incident_id: str
+    sender_role: Literal["tenant", "agent", "vendor", "scheduler", "system"]
+    sender_id: str
+    recipient_role: Literal["tenant", "agent", "vendor", "scheduler", "system"]
+    recipient_id: str
+    channel: str = Field(min_length=1, max_length=80)
+    direction: Literal["inbound", "outbound"]
+    message_type: Literal["text", "image", "audio", "button", "invoice", "system"]
+    text: str = Field(default="", max_length=4000)
+    media_ids: list[str] = Field(default_factory=list, max_length=20)
+    provider_message_id: str | None = Field(default=None, max_length=200)
+    delivery_status: Literal["received", "sent", "delivered", "failed", "simulated", "deduplicated"]
+    timestamp: datetime
+
+
+class MediaDescriptor(StrictModel):
+    """Safe client-facing media metadata; storage URIs never leave the backend."""
+
+    media_id: str
+    filename: str
+    mime_type: str
+    size_bytes: int = Field(ge=0)
+    source: Literal["tenant", "vendor", "system"]
+    url: str
+
+
 class PropertyConfig(StrictModel):
     property_id: str
     display_name: str
@@ -149,6 +190,22 @@ class PairingCodeResponse(StrictModel):
     deep_link: str
     target_type: Literal["tenant", "vendor"]
     target_id: str
+    expires_at: datetime
+
+
+class TelegramDraft(StrictModel):
+    """A persisted, expiring tenant report assembled from Telegram updates."""
+
+    draft_id: str
+    tenant_id: str
+    property_id: str
+    telegram_chat_id: str
+    text_parts: list[str] = Field(default_factory=list, max_length=20)
+    media: list[MediaAsset] = Field(default_factory=list, max_length=10)
+    communication_ids: list[str] = Field(default_factory=list, max_length=20)
+    submitted_incident_id: str | None = None
+    created_at: datetime
+    updated_at: datetime
     expires_at: datetime
 
 
@@ -226,6 +283,7 @@ class Incident(StrictModel):
     report_text: str = ""
     voice_transcript: str | None = None
     media_ids: list[str] = Field(default_factory=list)
+    report_assessment: ReportAssessment | None = None
     facts: ObservableFacts | None = None
     containment_instructions: str | None = None
     work_order_id: str | None = None
@@ -250,6 +308,8 @@ class ReportInput(StrictModel):
     voice_transcript: str | None = Field(default=None, max_length=4000)
     media: list[MediaAsset] = Field(default_factory=list, max_length=5)
     idempotency_key: str | None = Field(default=None, max_length=120)
+    source_channel: str = Field(default="local_demo", max_length=80)
+    provider_message_id: str | None = Field(default=None, max_length=200)
 
 
 class ActionRequest(StrictModel):

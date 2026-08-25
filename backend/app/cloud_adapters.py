@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -25,12 +26,38 @@ class GoogleCloudStorageMediaStore:
         )
 
     def put(self, asset: MediaAsset) -> str:
-        blob = self.bucket.blob(f"incidents/{asset.asset_id}/{asset.filename}")
+        safe_filename = asset.filename.replace("\\", "/").rsplit("/", 1)[-1] or "media.bin"
+        blob = self.bucket.blob(f"incidents/{asset.asset_id}/{safe_filename}")
+        blob.metadata = {"source": asset.source, "asset_id": asset.asset_id}
         if asset.content_base64:
             blob.upload_from_string(
                 base64.b64decode(asset.content_base64), content_type=asset.mime_type
             )
         return f"gs://{self.bucket.name}/{blob.name}"
+
+    def get(self, asset_id: str) -> MediaAsset | None:
+        """Read only the exact incident asset prefix; callers authorize incident membership."""
+
+        prefix = f"incidents/{asset_id}/"
+        blobs = list(self.bucket.list_blobs(prefix=prefix, max_results=2))
+        if len(blobs) != 1:
+            return None
+        blob = blobs[0]
+        raw = blob.download_as_bytes()
+        filename = blob.name.rsplit("/", 1)[-1]
+        source = (blob.metadata or {}).get("source", "system")
+        if source not in {"tenant", "vendor", "system"}:
+            source = "system"
+        return MediaAsset(
+            asset_id=asset_id,
+            filename=filename,
+            mime_type=blob.content_type or "application/octet-stream",
+            size_bytes=len(raw),
+            sha256=hashlib.sha256(raw).hexdigest(),
+            content_base64=base64.b64encode(raw).decode(),
+            storage_uri=f"gs://{self.bucket.name}/{blob.name}",
+            source=source,  # type: ignore[arg-type]
+        )
 
 
 class GoogleSecretManagerProvider:

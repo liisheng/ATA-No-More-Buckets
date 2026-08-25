@@ -53,7 +53,10 @@ def test_evidence_gate_rejects_mismatch_and_accepts_scoped_invoice(completion_me
     )
     bad = CompletionEvidence(photo=completion_media)
     bad_result = assess_completion(
-        bad, CompletionPhotoFacts(photo_matches=False, photo_match_confidence=0.99), work_order, "vendor-b"
+        bad,
+        CompletionPhotoFacts(photo_matches=False, photo_match_confidence=0.99),
+        work_order,
+        "vendor-b",
     )
     assert not bad_result.passed
     assert any("does not match" in reason for reason in bad_result.blocking_reasons)
@@ -71,10 +74,18 @@ def test_evidence_gate_rejects_mismatch_and_accepts_scoped_invoice(completion_me
         ),
     )
     assert assess_completion(
-        good, CompletionPhotoFacts(photo_matches=True, photo_match_confidence=0.95), work_order, "vendor-b"
+        good,
+        CompletionPhotoFacts(photo_matches=True, photo_match_confidence=0.95),
+        work_order,
+        "vendor-b",
     ).passed
 
 
 def test_conflicting_or_low_confidence_facts_escalate() -> None:
     assert evaluate_safety(ObservableFacts(source_confidence=0.4)).rule_id == "FACTS_LOW_CONFIDENCE"
-    assert evaluate_safety(ObservableFacts(uncertainties=["photo conflicts with text"], source_confidence=0.95)).rule_id == "FACTS_CONFLICT_OR_UNCERTAIN"
+    assert (
+        evaluate_safety(
+            ObservableFacts(uncertainties=["photo conflicts with text"], source_confidence=0.95)
+        ).rule_id
+        == "FACTS_CONFLICT_OR_UNCERTAIN"
+    )

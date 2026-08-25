@@ -6,7 +6,7 @@ No More Buckets turns a tenant’s first drip into a safe, bounded, auditable re
 
 ## What the four-minute demo proves
 
-The console surfaces the complete causal chain: multimodal report → schema-validated facts → property-specific containment → bounded work order → Vendor A failure → Vendor B fallback → ETA/access → completion photo and invoice gate → delayed tenant confirmation → final state. The proof strip reports the active deployment, observation provider/model, source-of-truth backend, and eventing adapters.
+The primary console is a live three-lane control room driven by Telegram and persisted backend events: multimodal report → schema-validated facts → property-specific containment → bounded work order → Vendor A failure → Vendor B fallback → ETA/access → completion photo and invoice gate → delayed tenant confirmation → final state. The proof strip reports the active deployment, observation provider/model, source-of-truth backend, and eventing adapters. A clearly secondary deterministic replay remains available for repeatable judging.
 
 ## Why the agentic design is trustworthy
 

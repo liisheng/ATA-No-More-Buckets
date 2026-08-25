@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import secrets
+import threading
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 import structlog
@@ -25,14 +26,17 @@ from .config import Settings
 from .models import (
     ActionRequest,
     ApprovalRequest,
+    CommunicationRecord,
     CompletionEvidence,
     Incident,
     IncidentStatus,
     PairingCodeRecord,
     PairingCodeResponse,
     PropertyConfig,
+    ReportAssessment,
     ReportInput,
     RuntimeMetadata,
+    TelegramDraft,
     TenantContact,
     TimelineEntry,
     Vendor,
@@ -50,6 +54,15 @@ from .repositories import IncidentRepository
 from .state_machine import validate_transition
 
 log = structlog.get_logger(__name__)
+
+ContactRole = Literal["tenant", "agent", "vendor", "scheduler", "system"]
+ContactMessageType = Literal["text", "image", "audio", "button", "invoice", "system"]
+
+
+def _safe_contact_text(value: str | None, max_length: int = 4000) -> str:
+    if not value:
+        return ""
+    return " ".join("".join(char for char in value if char.isprintable()).split())[:max_length]
 
 
 class IncidentNotFound(KeyError):
@@ -89,6 +102,241 @@ class IncidentService:
         self.clock = clock or SystemClock()
         self.agent = agent
         self.started_telegram_chats: set[str] = set()
+        self._local_task_timers: dict[str, threading.Timer] = {}
+
+    def _enqueue_task(
+        self,
+        task_id: str,
+        incident_id: str,
+        task_type: str,
+        payload: dict[str, Any],
+        delay_seconds: int,
+    ) -> str:
+        result = self.tasks.enqueue(task_id, incident_id, task_type, payload, delay_seconds)
+        if (
+            self.settings.demo_mode
+            and self.settings.app_env == "demo"
+            and self.tasks.provider_name == "local_tasks"
+            and task_id not in self._local_task_timers
+        ):
+            timer = threading.Timer(
+                max(0, delay_seconds),
+                self._run_local_task,
+                args=(task_id, incident_id, task_type, payload),
+            )
+            timer.daemon = True
+            self._local_task_timers[task_id] = timer
+            timer.start()
+        return result
+
+    def _run_local_task(
+        self, task_id: str, incident_id: str, task_type: str, payload: dict[str, Any]
+    ) -> None:
+        self.record_communication(
+            communication_id=f"comm:scheduler:{task_id}",
+            incident_id=incident_id,
+            sender_role="scheduler",
+            sender_id=self.tasks.provider_name,
+            recipient_role="agent",
+            recipient_id="no-more-buckets",
+            channel=self.tasks.provider_name,
+            direction="inbound",
+            message_type="system",
+            text=f"Scheduler delivered {task_type}.",
+            provider_message_id=task_id,
+            delivery_status="simulated",
+        )
+        try:
+            if task_type == "tenant_confirmation":
+                self.request_tenant_confirmation(incident_id, event_id=f"task-{task_id}")
+            elif task_type == "vendor_timeout":
+                self.process_action(
+                    incident_id,
+                    ActionRequest(
+                        action="vendor_timeout",
+                        event_id=f"task-{task_id}",
+                        payload={"vendor_id": payload.get("vendor_id", "")},
+                    ),
+                )
+            elif task_type == "vendor_retry":
+                self.process_action(
+                    incident_id,
+                    ActionRequest(
+                        action="vendor_retry",
+                        event_id=f"task-{task_id}",
+                        payload={"vendor_id": payload.get("vendor_id", "")},
+                    ),
+                )
+        finally:
+            self._local_task_timers.pop(task_id, None)
+
+    def _draft_now(self) -> datetime:
+        # Draft expiry is a user-input safety boundary, not a demo-clock event.
+        return datetime.now(UTC)
+
+    def get_active_telegram_draft(self, telegram_chat_id: str) -> TelegramDraft | None:
+        for draft in self.repository.list_drafts(telegram_chat_id):
+            if self._draft_now() >= draft.expires_at:
+                self.repository.delete_draft(draft.draft_id)
+                continue
+            if draft.submitted_incident_id:
+                continue
+            return draft
+        return None
+
+    def create_telegram_draft(self, tenant: TenantContact, telegram_chat_id: str) -> TelegramDraft:
+        existing = self.get_active_telegram_draft(telegram_chat_id)
+        if existing:
+            return existing
+        now = self._draft_now()
+        draft = TelegramDraft(
+            draft_id=f"draft_{uuid4().hex[:12]}",
+            tenant_id=tenant.tenant_id,
+            property_id=tenant.property_id,
+            telegram_chat_id=telegram_chat_id,
+            created_at=now,
+            updated_at=now,
+            expires_at=now + timedelta(seconds=self.settings.telegram_draft_expiry_seconds),
+        )
+        self.repository.save_draft(draft)
+        return draft
+
+    def append_telegram_draft(
+        self,
+        draft_id: str,
+        telegram_chat_id: str,
+        *,
+        text: str,
+        media: list,
+        communication_id: str,
+        provider_message_id: str | None,
+    ) -> TelegramDraft:
+        draft = self.repository.get_draft(draft_id)
+        if not draft or draft.telegram_chat_id != telegram_chat_id:
+            raise ValueError("Telegram draft is unavailable")
+        if draft.submitted_incident_id:
+            raise ValueError("Telegram draft was already submitted")
+        if self._draft_now() >= draft.expires_at:
+            self.repository.delete_draft(draft_id)
+            raise ValueError("Telegram draft has expired; send /report to start again")
+        clean_text = _safe_contact_text(text)
+        if clean_text:
+            draft.text_parts.append(clean_text)
+        stored_media = []
+        for asset in media:
+            validate_media_asset(asset)
+            asset_copy = asset.model_copy(deep=True)
+            asset_copy.storage_uri = self.media_store.put(asset_copy)
+            # Draft records keep metadata and storage ownership; bytes are fetched
+            # back from the media store when the draft is submitted.
+            asset_copy.content_base64 = None
+            stored_media.append(asset_copy)
+            draft.media.append(asset_copy)
+        draft.updated_at = self._draft_now()
+        draft.communication_ids.append(communication_id)
+        self.repository.save_draft(draft)
+        if media:
+            message_type: ContactMessageType = (
+                "audio" if any(asset.mime_type.startswith("audio/") for asset in media) else "image"
+            )
+        else:
+            message_type = "text"
+        self.record_communication(
+            communication_id=communication_id,
+            incident_id=f"draft:{draft.draft_id}",
+            sender_role="tenant",
+            sender_id=draft.tenant_id,
+            recipient_role="agent",
+            recipient_id="no-more-buckets",
+            channel="telegram",
+            direction="inbound",
+            message_type=message_type,
+            text=clean_text or "Tenant added media to the draft report.",
+            media_ids=[asset.asset_id for asset in stored_media],
+            provider_message_id=provider_message_id,
+            delivery_status="received",
+        )
+        return draft
+
+    def cancel_telegram_draft(self, draft_id: str, telegram_chat_id: str) -> bool:
+        draft = self.repository.get_draft(draft_id)
+        if not draft or draft.telegram_chat_id != telegram_chat_id:
+            return False
+        if draft.submitted_incident_id:
+            return False
+        self.repository.delete_draft(draft_id)
+        return True
+
+    def submit_telegram_draft(
+        self, draft_id: str, telegram_chat_id: str, provider_message_id: str | None = None
+    ) -> Incident:
+        draft = self.repository.get_draft(draft_id)
+        if not draft or draft.telegram_chat_id != telegram_chat_id:
+            raise ValueError("Telegram draft is unavailable")
+        if draft.submitted_incident_id:
+            return self._get(draft.submitted_incident_id)
+        if self._draft_now() >= draft.expires_at:
+            self.repository.delete_draft(draft_id)
+            raise ValueError("Telegram draft has expired; send /report to start again")
+        if not draft.text_parts and not draft.media:
+            raise ValueError("Add a description, photo, or voice note before submitting")
+        media = []
+        for asset in draft.media:
+            stored = self.media_store.get(asset.asset_id)
+            if not stored:
+                raise ValueError("A draft media item is no longer available")
+            media.append(stored)
+        incident = self.submit_report(
+            ReportInput(
+                property_id=draft.property_id,
+                tenant_id=draft.tenant_id,
+                report_text="\n".join(draft.text_parts)
+                or "Tenant submitted a multimodal plumbing report.",
+                media=media,
+                idempotency_key=f"telegram-draft:{draft.draft_id}",
+                source_channel="telegram",
+                provider_message_id=provider_message_id or draft.draft_id,
+            )
+        )
+        self.repository.move_communications(f"draft:{draft.draft_id}", incident.incident_id)
+        draft.submitted_incident_id = incident.incident_id
+        draft.updated_at = self._draft_now()
+        self.repository.save_draft(draft)
+        return incident
+
+    def draft_summary(self, draft: TelegramDraft) -> str:
+        text_count = len(draft.text_parts)
+        image_count = sum(asset.mime_type.startswith("image/") for asset in draft.media)
+        audio_count = sum(asset.mime_type.startswith("audio/") for asset in draft.media)
+        excerpts = [part[:140] for part in draft.text_parts[-3:]]
+        excerpt_text = "\n".join(f"• {part}" for part in excerpts) or "• (no text yet)"
+        remaining = max(0, int((draft.expires_at - self._draft_now()).total_seconds()))
+        return (
+            f"Report draft {draft.draft_id}\n"
+            f"Text updates: {text_count} · photos: {image_count} · voice notes: {audio_count}\n"
+            f"Expires in about {remaining // 60}m {remaining % 60:02d}s\n"
+            f"{excerpt_text}\n\n"
+            "Add more text, a photo, or a voice note, then tap Submit report."
+        )
+
+    def send_draft_message(
+        self,
+        draft: TelegramDraft,
+        text: str,
+        action_key: str,
+        reply_markup: dict[str, Any] | None = None,
+        message_type: ContactMessageType = "system",
+    ) -> str:
+        return self._send_outbound(
+            incident_id=f"draft:{draft.draft_id}",
+            recipient_role="tenant",
+            logical_recipient_id=draft.tenant_id,
+            delivery_recipient_id=draft.telegram_chat_id,
+            text=text,
+            action_key=action_key,
+            message_type=message_type,
+            reply_markup=reply_markup,
+        )
 
     def runtime_metadata(self) -> RuntimeMetadata:
         deployment = "cloud_run" if self.settings.k_service else "local_container"
@@ -165,6 +413,44 @@ class IncidentService:
         incident.version += 1
         self.repository.save(incident)
 
+    def record_communication(
+        self,
+        *,
+        communication_id: str,
+        incident_id: str,
+        sender_role: ContactRole,
+        sender_id: str,
+        recipient_role: ContactRole,
+        recipient_id: str,
+        channel: str,
+        direction: Literal["inbound", "outbound"],
+        message_type: ContactMessageType,
+        text: str = "",
+        media_ids: list[str] | None = None,
+        provider_message_id: str | None = None,
+        delivery_status: Literal[
+            "received", "sent", "delivered", "failed", "simulated", "deduplicated"
+        ] = "received",
+    ) -> CommunicationRecord:
+        record = CommunicationRecord(
+            communication_id=communication_id,
+            incident_id=incident_id,
+            sender_role=sender_role,
+            sender_id=sender_id,
+            recipient_role=recipient_role,
+            recipient_id=recipient_id,
+            channel=channel,
+            direction=direction,
+            message_type=message_type,
+            text=_safe_contact_text(text),
+            media_ids=list(media_ids or []),
+            provider_message_id=_safe_contact_text(provider_message_id, 200) or None,
+            delivery_status=delivery_status,
+            timestamp=self.clock.now(),
+        )
+        self.repository.save_communication(record)
+        return record
+
     def _timeline(
         self,
         incident: Incident,
@@ -224,7 +510,71 @@ class IncidentService:
             state_to=transition.to_status,
         )
 
-    def _notify(self, incident: Incident, text: str, action_key: str) -> None:
+    def _send_outbound(
+        self,
+        *,
+        incident_id: str,
+        recipient_role: Literal["tenant", "vendor"],
+        logical_recipient_id: str,
+        delivery_recipient_id: str,
+        text: str,
+        action_key: str,
+        message_type: ContactMessageType = "text",
+        media_ids: list[str] | None = None,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> str:
+        scoped_action_key = f"{incident_id}:{action_key}"
+        try:
+            outcome = self.notifications.send(
+                NotificationMessage(
+                    incident_id, delivery_recipient_id, text, scoped_action_key, reply_markup
+                )
+            )
+        except Exception:
+            self.record_communication(
+                communication_id=f"comm:notify:{incident_id}:{action_key}",
+                incident_id=incident_id,
+                sender_role="agent",
+                sender_id="no-more-buckets",
+                recipient_role=recipient_role,
+                recipient_id=logical_recipient_id,
+                channel=self.notifications.provider_name,
+                direction="outbound",
+                message_type=message_type,
+                text=text,
+                media_ids=media_ids,
+                delivery_status="failed",
+            )
+            raise
+        delivery_status = (
+            "deduplicated"
+            if outcome.startswith("deduped:")
+            else ("sent" if self.notifications.provider_name == "telegram" else "simulated")
+        )
+        self.record_communication(
+            communication_id=f"comm:notify:{incident_id}:{action_key}",
+            incident_id=incident_id,
+            sender_role="agent",
+            sender_id="no-more-buckets",
+            recipient_role=recipient_role,
+            recipient_id=logical_recipient_id,
+            channel=self.notifications.provider_name,
+            direction="outbound",
+            message_type=message_type,
+            text=text,
+            media_ids=media_ids,
+            provider_message_id=outcome,
+            delivery_status=delivery_status,  # type: ignore[arg-type]
+        )
+        return outcome
+
+    def _notify(
+        self,
+        incident: Incident,
+        text: str,
+        action_key: str,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> None:
         tenant = self.tenants.get(incident.tenant_id)
         if self.notifications.provider_name == "telegram" and (
             not tenant or not tenant.telegram_chat_id
@@ -236,21 +586,68 @@ class IncidentService:
                 metadata={"recipient_type": "tenant"},
             )
             return
-        recipient_id = tenant.telegram_chat_id if tenant and tenant.telegram_chat_id else incident.tenant_id
-        scoped_action_key = f"{incident.incident_id}:{action_key}"
-        if self.notifications.provider_name == "telegram" and recipient_id not in self.started_telegram_chats:
+        recipient_id = (
+            tenant.telegram_chat_id if tenant and tenant.telegram_chat_id else incident.tenant_id
+        )
+        if (
+            self.notifications.provider_name == "telegram"
+            and recipient_id not in self.started_telegram_chats
+        ):
             self._timeline(
                 incident,
                 "notification_blocked_until_start",
                 "TELEGRAM_START_REQUIRED",
-                metadata={"recipient_type": "tenant_or_vendor"},
+                metadata={"recipient_type": "tenant"},
             )
             return
-        outcome = self.notifications.send(
-            NotificationMessage(incident.incident_id, recipient_id, text, scoped_action_key)
+        outcome = self._send_outbound(
+            incident_id=incident.incident_id,
+            recipient_role="tenant",
+            logical_recipient_id=incident.tenant_id,
+            delivery_recipient_id=recipient_id,
+            text=text,
+            action_key=action_key,
+            reply_markup=reply_markup,
         )
         self._timeline(
             incident, "notification_sent", "NOTIFY_DEDUPED_SAFE", metadata={"outcome": outcome}
+        )
+
+    def _notify_vendor(
+        self,
+        incident: Incident,
+        vendor: Vendor,
+        text: str,
+        action_key: str,
+        reply_markup: dict[str, Any] | None = None,
+        message_type: ContactMessageType = "text",
+    ) -> None:
+        recipient_id = vendor.telegram_chat_id or vendor.vendor_id
+        if self.notifications.provider_name == "telegram" and (
+            not vendor.telegram_chat_id or recipient_id not in self.started_telegram_chats
+        ):
+            self._timeline(
+                incident,
+                "vendor_notification_blocked",
+                "TELEGRAM_VENDOR_PAIRING_REQUIRED",
+                metadata={"vendor_id": vendor.vendor_id},
+            )
+            return
+        outcome = self._send_outbound(
+            incident_id=incident.incident_id,
+            recipient_role="vendor",
+            logical_recipient_id=vendor.vendor_id,
+            delivery_recipient_id=recipient_id,
+            text=text,
+            action_key=action_key,
+            message_type=message_type,
+            reply_markup=reply_markup,
+        )
+        self._timeline(
+            incident,
+            "vendor_notification_sent",
+            "PROVIDER_CONTACT_RECORDED",
+            metadata={"vendor_id": vendor.vendor_id, "outcome": outcome},
         )
 
     def submit_report(self, report: ReportInput) -> Incident:
@@ -269,7 +666,7 @@ class IncidentService:
             raise ValueError("unknown property")
         for asset in report.media:
             validate_media_asset(asset)
-            self.media_store.put(asset)
+            asset.storage_uri = self.media_store.put(asset)
         now = self.clock.now()
         incident = Incident(
             incident_id=incident_id,
@@ -281,10 +678,45 @@ class IncidentService:
             created_at=now,
             updated_at=now,
         )
-        self._timeline(incident, "report_received", "REPORT_ACCEPTED")
-        incident.facts = self.extractor.extract(
-            report.report_text, report.voice_transcript, report.media
+        if report.media and not report.report_text.strip():
+            message_type: ContactMessageType = (
+                "audio"
+                if any(asset.mime_type.startswith("audio/") for asset in report.media)
+                else "image"
+            )
+        else:
+            message_type = "text"
+        self.record_communication(
+            communication_id=f"comm:report:{sha256(idempotency_key.encode()).hexdigest()[:24]}",
+            incident_id=incident.incident_id,
+            sender_role="tenant",
+            sender_id=report.tenant_id,
+            recipient_role="agent",
+            recipient_id="no-more-buckets",
+            channel=report.source_channel,
+            direction="inbound",
+            message_type=message_type,
+            text=report.report_text or report.voice_transcript or "Tenant submitted media.",
+            media_ids=[asset.asset_id for asset in report.media],
+            provider_message_id=report.provider_message_id,
+            delivery_status="received",
         )
+        self._timeline(incident, "report_received", "REPORT_ACCEPTED")
+        assessor = getattr(self.extractor, "assess", None)
+        if callable(assessor):
+            assessment = assessor(report.report_text, report.voice_transcript, report.media)
+        else:
+            facts = self.extractor.extract(
+                report.report_text, report.voice_transcript, report.media
+            )
+            assessment = ReportAssessment(
+                voice_transcript=report.voice_transcript,
+                facts=facts,
+                confidence=facts.source_confidence,
+            )
+        incident.report_assessment = assessment
+        incident.voice_transcript = assessment.voice_transcript or report.voice_transcript
+        incident.facts = assessment.facts
         self._transition(incident, IncidentStatus.TRIAGED, "FACTS_SCHEMA_VALIDATED")
         safety = evaluate_safety(incident.facts)
         if safety.escalate:
@@ -353,13 +785,38 @@ class IncidentService:
         incident.assigned_vendor_id = vendor.vendor_id
         incident.work_order.vendor_id = vendor.vendor_id
         incident.work_order.status = "dispatched"
-        incident.eta = self.clock.now() + timedelta(minutes=20 if self.settings.demo_mode else 60)
         if incident.status != IncidentStatus.SCHEDULED:
-            self._transition(incident, IncidentStatus.SCHEDULED, "VENDOR_ACCEPTED_ELIGIBLE", event_id)
+            self._transition(
+                incident, IncidentStatus.SCHEDULED, "VENDOR_ACCEPTED_ELIGIBLE", event_id
+            )
+        eta_message = (
+            f" ETA: {incident.eta.isoformat()}."
+            if incident.eta
+            else " Reply ETA <minutes> when the arrival time is confirmed."
+        )
         self._notify(
             incident,
-            f"{vendor.name} accepted the bounded repair. ETA: {incident.eta.isoformat()}.",
+            f"{vendor.name} accepted the bounded repair.{eta_message}",
             f"vendor-accepted:{vendor.vendor_id}",
+        )
+        self._notify_vendor(
+            incident,
+            vendor,
+            (
+                "Accepted. Tap Start job when you arrive. Then send one after-photo with this caption:\n"
+                "COMPLETE\nPRICE <amount>\nSCOPE <work performed>"
+            ),
+            f"vendor-start-instructions:{vendor.vendor_id}",
+            reply_markup={
+                "inline_keyboard": [
+                    [
+                        {
+                            "text": "Start job",
+                            "callback_data": f"vendor:{incident.incident_id}:start",
+                        }
+                    ]
+                ]
+            },
         )
 
     def _dispatch_next(self, incident: Incident, trigger_event_id: str) -> None:
@@ -391,11 +848,26 @@ class IncidentService:
             return
         vendor = candidates[0]
         assert incident.work_order is not None
+        vendor_channel = getattr(self.vendors_adapter, "provider_name", "vendor_adapter")
         try:
             result = self.vendors_adapter.dispatch(
                 incident.work_order, vendor, f"dispatch:{incident.incident_id}:{vendor.vendor_id}"
             )
         except Exception:
+            self.record_communication(
+                communication_id=f"comm:dispatch:{incident.incident_id}:{vendor.vendor_id}",
+                incident_id=incident.incident_id,
+                sender_role="agent",
+                sender_id="no-more-buckets",
+                recipient_role="vendor",
+                recipient_id=vendor.vendor_id,
+                channel=vendor_channel,
+                direction="outbound",
+                message_type="button",
+                text="Vendor dispatch provider failed; retry scheduled.",
+                provider_message_id=None,
+                delivery_status="failed",
+            )
             retry_count = sum(
                 1
                 for entry in incident.timeline
@@ -403,7 +875,9 @@ class IncidentService:
                 and entry.metadata.get("vendor_id") == vendor.vendor_id
             )
             if retry_count >= 3:
-                self._transition(incident, IncidentStatus.ESCALATED, "VENDOR_PROVIDER_RETRY_EXHAUSTED")
+                self._transition(
+                    incident, IncidentStatus.ESCALATED, "VENDOR_PROVIDER_RETRY_EXHAUSTED"
+                )
                 self._timeline(
                     incident,
                     "approval_required",
@@ -413,7 +887,7 @@ class IncidentService:
                 self._save(incident)
                 return
             retry_task_id = self._task_id("vendor-retry", incident.incident_id, vendor.vendor_id)
-            self.tasks.enqueue(
+            self._enqueue_task(
                 retry_task_id,
                 incident.incident_id,
                 "vendor_retry",
@@ -428,6 +902,30 @@ class IncidentService:
             )
             self._save(incident)
             return
+        dispatch_status = (
+            "deduplicated"
+            if result.provider_event_id.startswith("deduped:")
+            else (
+                "sent"
+                if vendor_channel in {"telegram_vendor_dispatch", "telegram_demo_vendor"}
+                and not result.provider_event_id.startswith("demo-")
+                else "simulated"
+            )
+        )
+        self.record_communication(
+            communication_id=f"comm:dispatch:{incident.incident_id}:{vendor.vendor_id}",
+            incident_id=incident.incident_id,
+            sender_role="agent",
+            sender_id="no-more-buckets",
+            recipient_role="vendor",
+            recipient_id=result.recipient_id or vendor.vendor_id,
+            channel=vendor_channel,
+            direction="outbound",
+            message_type="button",  # type: ignore[arg-type]
+            text=result.text or f"Bounded work order dispatched to {vendor.name}.",
+            provider_message_id=result.provider_event_id,
+            delivery_status=dispatch_status,  # type: ignore[arg-type]
+        )
         outcome = result.outcome
         attempt_outcome = {"accept": "accepted", "decline": "declined", "timeout": "timed_out"}.get(
             outcome, outcome
@@ -459,7 +957,7 @@ class IncidentService:
             return
         if outcome == "pending":
             task_id = self._task_id("vendor-timeout", incident.incident_id, vendor.vendor_id)
-            self.tasks.enqueue(
+            self._enqueue_task(
                 task_id,
                 incident.incident_id,
                 "vendor_timeout",
@@ -473,6 +971,7 @@ class IncidentService:
                 metadata={
                     "vendor_id": vendor.vendor_id,
                     "task_id": task_id,
+                    "timeout_seconds": self._vendor_timeout_seconds(incident),
                     "deadline_at": deadline.isoformat() if deadline else None,
                 },
             )
@@ -518,7 +1017,10 @@ class IncidentService:
                 self._dispatch_next(incident, request.event_id)
             else:
                 self._timeline(
-                    incident, "vendor_retry_ignored", "VENDOR_RETRY_NOT_DISPATCHING", event_id=request.event_id
+                    incident,
+                    "vendor_retry_ignored",
+                    "VENDOR_RETRY_NOT_DISPATCHING",
+                    event_id=request.event_id,
                 )
         elif action == "vendor_timeout":
             vendor_id = str(request.payload.get("vendor_id", ""))
@@ -536,7 +1038,10 @@ class IncidentService:
                     "late_vendor_timeout_ignored",
                     "ASSIGNED_VENDOR_WINS_RACE",
                     event_id=request.event_id,
-                    metadata={"vendor_id": vendor_id, "assigned_vendor_id": incident.assigned_vendor_id},
+                    metadata={
+                        "vendor_id": vendor_id,
+                        "assigned_vendor_id": incident.assigned_vendor_id,
+                    },
                 )
             elif pending_attempt and incident.status == IncidentStatus.DISPATCHING:
                 pending_attempt.outcome = "timed_out"
@@ -567,7 +1072,9 @@ class IncidentService:
                 ),
                 None,
             )
-            vendor = next((candidate for candidate in self.vendors if candidate.vendor_id == vendor_id), None)
+            vendor = next(
+                (candidate for candidate in self.vendors if candidate.vendor_id == vendor_id), None
+            )
             if not pending_attempt or not vendor or incident.status != IncidentStatus.DISPATCHING:
                 self._timeline(
                     incident,
@@ -624,9 +1131,53 @@ class IncidentService:
                 "eta-update",
             )
         elif action == "work_started":
-            self._transition(
-                incident, IncidentStatus.IN_PROGRESS, "VENDOR_CHECK_IN_RECEIVED", request.event_id
-            )
+            if incident.status == IncidentStatus.SCHEDULED:
+                vendor = next(
+                    (
+                        candidate
+                        for candidate in self.vendors
+                        if candidate.vendor_id == incident.assigned_vendor_id
+                    ),
+                    None,
+                )
+                if incident.approval and incident.approval.status == "pending":
+                    self._timeline(
+                        incident,
+                        "work_started_blocked",
+                        "SPENDING_APPROVAL_REQUIRED",
+                        event_id=request.event_id,
+                    )
+                    if vendor:
+                        self._notify_vendor(
+                            incident,
+                            vendor,
+                            "Work cannot start until the manager approves the over-limit quote.",
+                            "work-start-blocked-approval",
+                        )
+                else:
+                    self._transition(
+                        incident,
+                        IncidentStatus.IN_PROGRESS,
+                        "VENDOR_CHECK_IN_RECEIVED",
+                        request.event_id,
+                    )
+                if vendor and incident.status == IncidentStatus.IN_PROGRESS:
+                    self._notify_vendor(
+                        incident,
+                        vendor,
+                        (
+                            "Job started. Send the after-photo in this chat with the exact caption:\n"
+                            "COMPLETE\nPRICE 220\nSCOPE leak repair labor and replacement seal"
+                        ),
+                        "completion-request",
+                    )
+            else:
+                self._timeline(
+                    incident,
+                    "work_started_ignored",
+                    "WORK_START_REQUIRES_SCHEDULED",
+                    event_id=request.event_id,
+                )
         elif action == "completion":
             self._handle_completion(incident, request)
         elif action == "tenant_confirm":
@@ -659,10 +1210,50 @@ class IncidentService:
         self._save(incident)
         return incident
 
-    def _handle_vendor_quote(self, incident: Incident, request: ActionRequest) -> None:
-        if not incident.work_order or incident.assigned_vendor_id != request.payload.get("vendor_id"):
+    def request_tenant_confirmation(self, incident_id: str, event_id: str) -> Incident:
+        """Send the delayed prompt; only a tenant response may close the incident."""
+
+        incident = self._get(incident_id)
+        if not self.repository.claim_event(event_id):
+            return incident
+        if incident.status == IncidentStatus.PROVISIONALLY_RESOLVED:
             self._timeline(
-                incident, "vendor_quote_ignored", "VENDOR_QUOTE_NOT_ASSIGNED", event_id=request.event_id
+                incident,
+                "tenant_confirmation_reminder_sent",
+                "DELAYED_CONFIRMATION_REQUIRED",
+                event_id=event_id,
+            )
+            self._notify(
+                incident,
+                "Please tap Dry now if the repair is holding, or Still leaking if it recurred.",
+                "tenant-confirmation-reminder",
+                reply_markup={
+                    "inline_keyboard": [
+                        [
+                            {
+                                "text": "Dry now",
+                                "callback_data": f"tenant:{incident.incident_id}:dry",
+                            },
+                            {
+                                "text": "Still leaking",
+                                "callback_data": f"tenant:{incident.incident_id}:leaking",
+                            },
+                        ]
+                    ]
+                },
+            )
+            self._save(incident)
+        return incident
+
+    def _handle_vendor_quote(self, incident: Incident, request: ActionRequest) -> None:
+        if not incident.work_order or incident.assigned_vendor_id != request.payload.get(
+            "vendor_id"
+        ):
+            self._timeline(
+                incident,
+                "vendor_quote_ignored",
+                "VENDOR_QUOTE_NOT_ASSIGNED",
+                event_id=request.event_id,
             )
             return
         amount = round(float(request.payload.get("amount", -1)), 2)
@@ -686,12 +1277,29 @@ class IncidentService:
             limit=incident.work_order.authorized_amount,
             created_at=self.clock.now(),
         )
-        self._transition(incident, IncidentStatus.ESCALATED, "VENDOR_QUOTE_APPROVAL_REQUIRED", request.event_id)
+        self._transition(
+            incident, IncidentStatus.ESCALATED, "VENDOR_QUOTE_APPROVAL_REQUIRED", request.event_id
+        )
         self._notify(
             incident,
             "The vendor quote exceeds the approved amount and needs manager approval.",
             "vendor-quote-approval",
         )
+        vendor = next(
+            (
+                candidate
+                for candidate in self.vendors
+                if candidate.vendor_id == incident.assigned_vendor_id
+            ),
+            None,
+        )
+        if vendor:
+            self._notify_vendor(
+                incident,
+                vendor,
+                "This quote is above the S$250 autonomous limit. Do not start or continue work until manager approval.",
+                "vendor-quote-over-limit",
+            )
 
     def _handle_completion(self, incident: Incident, request: ActionRequest) -> None:
         if incident.status == IncidentStatus.SCHEDULED:
@@ -707,7 +1315,48 @@ class IncidentService:
         evidence = CompletionEvidence.model_validate(request.payload)
         if evidence.photo:
             validate_media_asset(evidence.photo)
-            self.media_store.put(evidence.photo)
+            evidence.photo.storage_uri = self.media_store.put(evidence.photo)
+            if evidence.photo.asset_id not in incident.media_ids:
+                incident.media_ids.append(evidence.photo.asset_id)
+            vendor_id = incident.assigned_vendor_id or "vendor-unknown"
+            completion_channel = (
+                "telegram" if self.notifications.provider_name == "telegram" else "local_demo"
+            )
+            completion_status = "received" if completion_channel == "telegram" else "simulated"
+            self.record_communication(
+                communication_id=f"comm:completion:{incident.incident_id}:{request.event_id}:image",
+                incident_id=incident.incident_id,
+                sender_role="vendor",
+                sender_id=vendor_id,
+                recipient_role="agent",
+                recipient_id="no-more-buckets",
+                channel=completion_channel,
+                direction="inbound",
+                message_type="image",
+                text="Completion evidence photo submitted.",
+                media_ids=[evidence.photo.asset_id],
+                provider_message_id=request.event_id,
+                delivery_status=completion_status,  # type: ignore[arg-type]
+            )
+        if evidence.invoice:
+            vendor_id = incident.assigned_vendor_id or evidence.invoice.vendor_id
+            completion_channel = (
+                "telegram" if self.notifications.provider_name == "telegram" else "local_demo"
+            )
+            self.record_communication(
+                communication_id=f"comm:completion:{incident.incident_id}:{request.event_id}:invoice",
+                incident_id=incident.incident_id,
+                sender_role="vendor",
+                sender_id=vendor_id,
+                recipient_role="agent",
+                recipient_id="no-more-buckets",
+                channel=completion_channel,
+                direction="inbound",
+                message_type="invoice",
+                text=f"Invoice {evidence.invoice.invoice_id} submitted: {evidence.invoice.currency} {evidence.invoice.total:.2f}.",
+                provider_message_id=request.event_id,
+                delivery_status="received" if completion_channel == "telegram" else "simulated",
+            )
         photo_facts = self.evidence_verifier.verify(evidence.photo, incident.work_order)
         assessment = assess_completion(
             evidence, photo_facts, incident.work_order, incident.assigned_vendor_id
@@ -737,7 +1386,7 @@ class IncidentService:
         )
         self._transition(incident, IncidentStatus.PROVISIONALLY_RESOLVED, "EVIDENCE_GATE_PASSED")
         task_id = self._task_id("tenant-confirm", incident.incident_id)
-        self.tasks.enqueue(
+        self._enqueue_task(
             task_id,
             incident.incident_id,
             "tenant_confirmation",
@@ -754,10 +1403,27 @@ class IncidentService:
             incident,
             "The repair evidence passed. Please confirm after you observe the fixture.",
             "tenant-confirmation-request",
+            reply_markup={
+                "inline_keyboard": [
+                    [
+                        {
+                            "text": "Dry now",
+                            "callback_data": f"tenant:{incident.incident_id}:dry",
+                        },
+                        {
+                            "text": "Still leaking",
+                            "callback_data": f"tenant:{incident.incident_id}:leaking",
+                        },
+                    ]
+                ]
+            },
         )
 
     def _handle_recurrence(self, incident: Incident, event_id: str) -> None:
-        if incident.status != IncidentStatus.CLOSED:
+        if incident.status not in {
+            IncidentStatus.CLOSED,
+            IncidentStatus.PROVISIONALLY_RESOLVED,
+        }:
             self._timeline(
                 incident, "recurrence_ignored", "WARRANTY_ONLY_REOPEN", event_id=event_id
             )
@@ -773,7 +1439,9 @@ class IncidentService:
             facts = incident.facts
             config = self.properties[incident.property_id]
             if not facts or evaluate_safety(facts).escalate:
-                self._transition(incident, IncidentStatus.ESCALATED, "WARRANTY_REOPEN_REQUIRES_REVIEW")
+                self._transition(
+                    incident, IncidentStatus.ESCALATED, "WARRANTY_REOPEN_REQUIRES_REVIEW"
+                )
                 return
             incident.assigned_vendor_id = None
             incident.vendor_attempts = []
@@ -795,7 +1463,9 @@ class IncidentService:
                     limit=incident.work_order.spending_limit,
                     created_at=self.clock.now(),
                 )
-                self._transition(incident, IncidentStatus.ESCALATED, "SPENDING_LIMIT_APPROVAL_REQUIRED")
+                self._transition(
+                    incident, IncidentStatus.ESCALATED, "SPENDING_LIMIT_APPROVAL_REQUIRED"
+                )
                 return
         else:
             self._timeline(
@@ -830,9 +1500,13 @@ class IncidentService:
             metadata={"approved_amount": approved_amount, "currency": incident.work_order.currency},
         )
         if incident.assigned_vendor_id:
-            self._transition(incident, IncidentStatus.SCHEDULED, "MANAGER_APPROVED_OVER_LIMIT", event_id)
+            self._transition(
+                incident, IncidentStatus.SCHEDULED, "MANAGER_APPROVED_OVER_LIMIT", event_id
+            )
             return
-        self._transition(incident, IncidentStatus.DISPATCHING, "MANAGER_APPROVED_OVER_LIMIT", event_id)
+        self._transition(
+            incident, IncidentStatus.DISPATCHING, "MANAGER_APPROVED_OVER_LIMIT", event_id
+        )
         self._save(incident)
         self._dispatch_next(incident, f"approval-dispatch:{incident.incident_id}")
 
@@ -846,22 +1520,31 @@ class IncidentService:
                     resumed += 1
                     self._save(incident)
                     continue
-                self._transition(incident, IncidentStatus.DISPATCHING, "WARRANTY_REOPEN_DISPATCH_ALLOWED")
+                self._transition(
+                    incident, IncidentStatus.DISPATCHING, "WARRANTY_REOPEN_DISPATCH_ALLOWED"
+                )
                 self._save(incident)
                 self._dispatch_next(incident, f"warranty-dispatch:{incident.incident_id}")
                 resumed += 1
             elif incident.status == IncidentStatus.DISPATCHING and incident.work_order:
                 pending = next(
-                    (attempt for attempt in incident.vendor_attempts if attempt.outcome == "pending"), None
+                    (
+                        attempt
+                        for attempt in incident.vendor_attempts
+                        if attempt.outcome == "pending"
+                    ),
+                    None,
                 )
                 if pending:
-                    task_id = self._task_id("vendor-timeout", incident.incident_id, pending.vendor_id)
+                    task_id = self._task_id(
+                        "vendor-timeout", incident.incident_id, pending.vendor_id
+                    )
                     remaining_seconds = self._vendor_timeout_seconds(incident)
                     if pending.deadline_at:
                         remaining_seconds = max(
                             0, int((pending.deadline_at - self.clock.now()).total_seconds())
                         )
-                    self.tasks.enqueue(
+                    self._enqueue_task(
                         task_id,
                         incident.incident_id,
                         "vendor_timeout",
@@ -873,7 +1556,7 @@ class IncidentService:
                 resumed += 1
             elif incident.status == IncidentStatus.PROVISIONALLY_RESOLVED:
                 task_id = self._task_id("tenant-confirm", incident.incident_id)
-                self.tasks.enqueue(
+                self._enqueue_task(
                     task_id,
                     incident.incident_id,
                     "tenant_confirmation",
@@ -888,3 +1571,7 @@ class IncidentService:
 
     def get_incident(self, incident_id: str) -> Incident:
         return self._get(incident_id)
+
+    def list_communications(self, incident_id: str) -> list[CommunicationRecord]:
+        self._get(incident_id)
+        return self.repository.list_communications(incident_id)

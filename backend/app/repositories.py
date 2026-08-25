@@ -5,7 +5,15 @@ from copy import deepcopy
 from datetime import datetime
 from typing import Protocol
 
-from .models import Incident, PairingCodeRecord, PropertyConfig, TenantContact, Vendor
+from .models import (
+    CommunicationRecord,
+    Incident,
+    PairingCodeRecord,
+    PropertyConfig,
+    TelegramDraft,
+    TenantContact,
+    Vendor,
+)
 
 
 class IncidentRepository(Protocol):
@@ -16,6 +24,20 @@ class IncidentRepository(Protocol):
     def get(self, incident_id: str) -> Incident | None: ...
 
     def list(self) -> builtins.list[Incident]: ...
+
+    def save_communication(self, record: CommunicationRecord) -> None: ...
+
+    def list_communications(self, incident_id: str) -> builtins.list[CommunicationRecord]: ...
+
+    def save_draft(self, draft: TelegramDraft) -> None: ...
+
+    def get_draft(self, draft_id: str) -> TelegramDraft | None: ...
+
+    def list_drafts(self, telegram_chat_id: str) -> builtins.list[TelegramDraft]: ...
+
+    def delete_draft(self, draft_id: str) -> None: ...
+
+    def move_communications(self, source_incident_id: str, target_incident_id: str) -> None: ...
 
     def claim_idempotency(self, key: str, incident_id: str) -> str | None: ...
 
@@ -30,7 +52,9 @@ class IncidentRepository(Protocol):
 
     def load_reference_data(
         self,
-    ) -> tuple[dict[str, PropertyConfig], builtins.list[Vendor], dict[str, TenantContact]] | None: ...
+    ) -> (
+        tuple[dict[str, PropertyConfig], builtins.list[Vendor], dict[str, TenantContact]] | None
+    ): ...
 
     def create_pairing_code(self, record: PairingCodeRecord) -> None: ...
 
@@ -38,7 +62,9 @@ class IncidentRepository(Protocol):
         self, code: str, telegram_chat_id: str, now: datetime
     ) -> PairingCodeRecord | None: ...
 
-    def bind_telegram_chat(self, target_type: str, target_id: str, telegram_chat_id: str) -> None: ...
+    def bind_telegram_chat(
+        self, target_type: str, target_id: str, telegram_chat_id: str
+    ) -> None: ...
 
 
 class InMemoryIncidentRepository:
@@ -49,6 +75,8 @@ class InMemoryIncidentRepository:
         self._idempotency: dict[str, str] = {}
         self._events: set[str] = set()
         self._pairing_codes: dict[str, PairingCodeRecord] = {}
+        self._communications: dict[str, CommunicationRecord] = {}
+        self._drafts: dict[str, TelegramDraft] = {}
 
     def save(self, incident: Incident) -> None:
         self._incidents[incident.incident_id] = deepcopy(incident)
@@ -59,6 +87,46 @@ class InMemoryIncidentRepository:
 
     def list(self) -> builtins.list[Incident]:
         return [deepcopy(item) for item in self._incidents.values()]
+
+    def save_communication(self, record: CommunicationRecord) -> None:
+        # Upsert by the stable communication ID so duplicate webhook/task delivery
+        # cannot create a second visible contact. A later provider result may update
+        # the delivery state without changing the record's identity.
+        self._communications[record.communication_id] = deepcopy(record)
+
+    def list_communications(self, incident_id: str) -> builtins.list[CommunicationRecord]:
+        records = [
+            deepcopy(record)
+            for record in self._communications.values()
+            if record.incident_id == incident_id
+        ]
+        return sorted(records, key=lambda record: record.timestamp)
+
+    def save_draft(self, draft: TelegramDraft) -> None:
+        self._drafts[draft.draft_id] = deepcopy(draft)
+
+    def get_draft(self, draft_id: str) -> TelegramDraft | None:
+        draft = self._drafts.get(draft_id)
+        return deepcopy(draft) if draft else None
+
+    def list_drafts(self, telegram_chat_id: str) -> builtins.list[TelegramDraft]:
+        return sorted(
+            [
+                deepcopy(draft)
+                for draft in self._drafts.values()
+                if draft.telegram_chat_id == telegram_chat_id
+            ],
+            key=lambda draft: draft.updated_at,
+            reverse=True,
+        )
+
+    def delete_draft(self, draft_id: str) -> None:
+        self._drafts.pop(draft_id, None)
+
+    def move_communications(self, source_incident_id: str, target_incident_id: str) -> None:
+        for record in self._communications.values():
+            if record.incident_id == source_incident_id:
+                record.incident_id = target_incident_id
 
     def claim_idempotency(self, key: str, incident_id: str) -> str | None:
         existing = self._idempotency.get(key)
@@ -117,6 +185,8 @@ class FirestoreIncidentRepository:
         self.timeline = self.client.collection("incident_timeline")
         self.idempotency = self.client.collection("idempotency_keys")
         self.events = self.client.collection("processed_events")
+        self.communications = self.client.collection("communications")
+        self.drafts = self.client.collection("telegram_drafts")
         self.reference_data = self.client.collection("reference_data")
 
     def save(self, incident: Incident) -> None:
@@ -138,6 +208,44 @@ class FirestoreIncidentRepository:
 
     def list(self) -> builtins.list[Incident]:
         return [Incident.model_validate(snapshot.to_dict()) for snapshot in self.incidents.stream()]
+
+    def save_communication(self, record: CommunicationRecord) -> None:
+        self.communications.document(record.communication_id).set(record.model_dump(mode="json"))
+
+    def list_communications(self, incident_id: str) -> builtins.list[CommunicationRecord]:
+        records = []
+        for snapshot in self.communications.stream():
+            value = snapshot.to_dict() or {}
+            if value.get("incident_id") == incident_id:
+                records.append(CommunicationRecord.model_validate(value))
+        return sorted(records, key=lambda record: record.timestamp)
+
+    def save_draft(self, draft: TelegramDraft) -> None:
+        self.drafts.document(draft.draft_id).set(draft.model_dump(mode="json"))
+
+    def get_draft(self, draft_id: str) -> TelegramDraft | None:
+        snapshot = self.drafts.document(draft_id).get()
+        if not snapshot.exists:
+            return None
+        return TelegramDraft.model_validate(snapshot.to_dict())
+
+    def list_drafts(self, telegram_chat_id: str) -> builtins.list[TelegramDraft]:
+        drafts = []
+        for snapshot in self.drafts.stream():
+            value = snapshot.to_dict() or {}
+            if value.get("telegram_chat_id") == telegram_chat_id:
+                drafts.append(TelegramDraft.model_validate(value))
+        return sorted(drafts, key=lambda draft: draft.updated_at, reverse=True)
+
+    def delete_draft(self, draft_id: str) -> None:
+        self.drafts.document(draft_id).delete()
+
+    def move_communications(self, source_incident_id: str, target_incident_id: str) -> None:
+        for snapshot in self.communications.stream():
+            value = snapshot.to_dict() or {}
+            if value.get("incident_id") == source_incident_id:
+                value["incident_id"] = target_incident_id
+                snapshot.reference.set(value)
 
     def claim_idempotency(self, key: str, incident_id: str) -> str | None:
         doc = self.idempotency.document(key)
