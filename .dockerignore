@@ -1,0 +1,10 @@
+.git
+.agent
+.env
+node_modules
+frontend/dist
+backend/.venv
+backend/__pycache__
+backend/.pytest_cache
+playwright-report
+test-results
