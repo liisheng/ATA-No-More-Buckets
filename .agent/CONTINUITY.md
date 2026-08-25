@@ -14,6 +14,7 @@
 
 ## [PROGRESS]
 
+- 2026-08-25T23:23+08:00 [TOOL] Visually verified the local app in the in-app browser: happy path reaches `CLOSED` with 20 timeline events and safety path reaches `ESCALATED` without dispatch. README local-source and Cloud Run demo timing instructions were corrected and pushed.
 - 2026-08-25T23:18+08:00 [TOOL] Merged the remote GitHub placeholder README without discarding the project README, pushed `main` to `https://github.com/liisheng/ATA-No-More-Buckets`, and verified local `HEAD` matches `origin/main`.
 - 2026-08-25T21:00+08:00 [CODE] Expanded the ignored local `.env` into the complete demo/Gemini/Telegram/GCP configuration: Gemini API facts are enabled, local memory remains the storage default, Telegram and cloud secrets stay blank/placeholders, and SGD policy plus compressed demo timings are explicit.
 - 2026-08-25T20:40+08:00 [CODE] Initialized the workspace as a Git repository on `main` with a clean initial commit; `.env`, caches, virtualenvs, node_modules, and frontend build output remain ignored.
