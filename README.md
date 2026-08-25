@@ -15,14 +15,23 @@ docker build -t no-more-buckets:local .
 docker run --rm -p 8080:8080 --env-file .env.example no-more-buckets:local
 ```
 
-Open [http://localhost:8080](http://localhost:8080) and select **Run four-minute demo**. Demo time is compressed, but the same service/state machine logic records the same timeline and guardrails. A local source run is also possible with Python 3.12 and Node 22+:
+Open [http://localhost:8080](http://localhost:8080) and select **Run four-minute demo**. Demo time is compressed, but the same service/state machine logic records the same timeline and guardrails. A local source run is also possible with Python 3.12 and Node 22+. Use two terminals so the API and Vite console run together:
 
 ```powershell
+# Terminal 1: credential-free deterministic API
+$env:MESSAGING_PROVIDER = "local"
+$env:STORAGE_BACKEND = "memory"
+$env:FACTS_PROVIDER = "deterministic"
+$env:ADK_ENABLED = "false"
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r backend/requirements-dev.txt
 python -m uvicorn app.main:app --app-dir backend --reload --port 8080
-cd frontend; npm install; npm run dev
+
+# Terminal 2: React/Vite console; open http://localhost:5173
+cd frontend
+npm install
+npm run dev
 ```
 
 ## Workflow
@@ -82,7 +91,7 @@ $pairing = Invoke-RestMethod -Method Post `
 $pairing.deep_link
 ```
 
-Open the returned link in Telegram, or send `/start <code>` to the bot. The code is consumed exactly once and binds that chat to the selected record. Pair `tenant-demo-001` too if tenant updates should arrive in Telegram; the web UI can submit the tenant report without tenant pairing. For the simplest four-minute demo, pair `vendor-b`, submit from the web UI, let seeded Vendor A time out after 8/12 seconds, and show the Vendor B Telegram dispatch. The console displays a `Demo clock enabled` badge. Vendor A's late acceptance cannot replace Vendor B.
+Open the returned link in Telegram, or send `/start <code>` to the bot. The code is consumed exactly once and binds that chat to the selected record. Pair `tenant-demo-001` too if tenant updates should arrive in Telegram; the web UI can submit the tenant report without tenant pairing. For the simplest Cloud Run demo, pair `vendor-b`, submit from the web UI, let seeded Vendor A time out after 8/12 seconds, and show the Vendor B Telegram dispatch. The credential-free local adapter records the same timeout/fallback decision immediately so the local demo stays fast. The console displays a `Demo clock enabled` badge. Vendor A's late acceptance cannot replace Vendor B.
 
 The local/demo adapter remains the credential-free default when `TELEGRAM_BOT_TOKEN` is empty. It uses the same workflow and idempotency logic, but records messages locally instead of calling Telegram. The seeded catalog contains only synthetic chat IDs; never put a bot token, webhook secret, or Gemini key in Firestore or source control.
 
