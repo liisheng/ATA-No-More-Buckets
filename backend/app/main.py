@@ -221,9 +221,10 @@ def _vendor_help(session: VendorSession | None) -> str:
         "AWAITING_ETA": "Send whole minutes, for example 20 or ETA 20.",
         "CONFIRMING_ETA": "Tap the ETA confirmation, Edit ETA, or Back to price.",
         "REVIEW": "Review the quote and ETA, then tap Submit quote and ETA.",
-        "SUBMITTED": "Tap Start job when you arrive, then Prepare completion when finished.",
+        "SUBMITTED": "Tap Start job when you arrive. When the repair is finished, send /complete.",
         "AWAITING_PHOTO": "Attach one clear after-photo.",
         "AWAITING_SCOPE": "Send a 10–500 character work summary.",
+        "CONFIRMING_FINAL_PRICE": "Confirm the final price, or tap Change final price and send a new amount.",
         "COMPLETION_REVIEW": "Review the completion and tap Submit completion.",
     }.get(session.stage, "Use /status for the current step.")
     values = f"Quote: S${session.draft_price:.2f}" if session.draft_price is not None else "Quote: not captured"
@@ -856,9 +857,7 @@ def telegram_webhook(
                     service._save_vendor_session(session)
                     service._notify_vendor(service.get_incident(session.incident_id), vendor, "Edit the work summary in 10–500 meaningful characters.", f"completion-scope-edit:{session.session_id}", service._force_reply("Describe work performed"))
                 elif parts[2] == "cf":
-                    session.stage = "COMPLETION_REVIEW"
-                    service._save_vendor_session(session)
-                    service._notify_vendor(service.get_incident(session.incident_id), vendor, "Changing the final price requires a new confirmed SGD amount. Send it now.", f"completion-price-edit:{session.session_id}", service._force_reply("Final SGD price, e.g. 220.00"))
+                    service.begin_final_price_edit(session)
                 elif parts[2] == "fp":
                     service.confirm_final_price(session, f"telegram-action-{update_id}")
                 elif parts[2] == "cs":
@@ -1212,6 +1211,9 @@ def telegram_webhook(
             service.cancel_vendor_session(session)
             service._notify_vendor(vendor_incident, vendor, "Draft cancelled. The accepted job and incident were not changed.", f"vendor-cancel:{session.session_id}")
             return {"status": "processed", "kind": "vendor_cancelled"}
+        if command == "/complete":
+            service.prepare_completion(session)
+            return {"status": "processed", "kind": "vendor_completion_started"}
         if session.stage == "AWAITING_PHOTO" and media:
             service.completion_photo(session, media)
             return {"status": "processed", "kind": "completion_photo"}

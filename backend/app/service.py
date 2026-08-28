@@ -1322,7 +1322,16 @@ class IncidentService:
         return session
 
     def cancel_vendor_session(self, session: VendorSession) -> VendorSession:
-        if session.submitted and session.stage not in {"AWAITING_PHOTO", "AWAITING_SCOPE", "COMPLETION_REVIEW"}:
+        if session.submitted and session.stage in {"AWAITING_PHOTO", "AWAITING_SCOPE", "COMPLETION_REVIEW", "CONFIRMING_FINAL_PRICE"}:
+            session.completion_photo_ids = []
+            session.completion_scope = None
+            session.final_price = session.draft_price
+            session.final_price_confirmed = False
+            session.cancelled = False
+            session.stage = "SUBMITTED"
+            self._save_vendor_session(session)
+            return session
+        if session.submitted:
             raise ValueError("An accepted job cannot be cancelled with /cancel.")
         session.cancelled = True
         session.stage = "CANCELLED"
@@ -1383,10 +1392,16 @@ class IncidentService:
             return session
         session.completion_scope = meaningful
         session.final_price = session.final_price or session.draft_price
-        session.final_price_confirmed = True
-        session.stage = "COMPLETION_REVIEW"
+        session.final_price_confirmed = False
+        session.stage = "CONFIRMING_FINAL_PRICE"
         self._save_vendor_session(session)
-        self._notify_vendor(incident, vendor, f"Review completion\n\nAfter-photo: Attached\nWork performed: {meaningful}\nFinal price: S${session.final_price:.2f}\n\nNothing has been submitted yet.", f"completion-review:{session.session_id}:{session.revision}", {"inline_keyboard": [[{"text": "Submit completion", "callback_data": f"vs:{session.session_id}:cs"}], [{"text": "Replace photo", "callback_data": f"vs:{session.session_id}:cr"}, {"text": "Edit work summary", "callback_data": f"vs:{session.session_id}:ce"}], [{"text": "Change final price", "callback_data": f"vs:{session.session_id}:cf"}, {"text": "Cancel completion draft", "callback_data": f"vs:{session.session_id}:cx"}]]})
+        self._notify_vendor(
+            incident,
+            vendor,
+            f"Confirm final price\n\nAfter-photo: Attached\nWork performed: {meaningful}\nFinal price: S${session.final_price:.2f}\n\nConfirm this price before Submit completion.",
+            f"completion-price-confirmation:{session.session_id}:{session.revision}",
+            {"inline_keyboard": [[{"text": f"Confirm S${session.final_price:.2f}", "callback_data": f"vs:{session.session_id}:fp"}, {"text": "Change final price", "callback_data": f"vs:{session.session_id}:cf"}], [{"text": "Cancel completion draft", "callback_data": f"vs:{session.session_id}:cx"}]]},
+        )
         return session
 
     def submit_completion(self, session: VendorSession, event_id: str) -> Incident:
@@ -1407,13 +1422,28 @@ class IncidentService:
 
     def change_final_price(self, session: VendorSession, amount: float) -> VendorSession:
         incident, vendor = self._session_context(session)
-        if session.stage != "COMPLETION_REVIEW":
+        if session.stage not in {"COMPLETION_REVIEW", "CONFIRMING_FINAL_PRICE"}:
             raise ValueError("Final price can only be changed from the completion review.")
         session.final_price = round(amount, 2)
         session.final_price_confirmed = False
         session.stage = "CONFIRMING_FINAL_PRICE"
         self._save_vendor_session(session)
         self._notify_vendor(incident, vendor, f"Confirm final price\n\nFinal price: S${amount:.2f}\n\nThis has not been submitted.", f"completion-price-review:{session.session_id}:{session.revision}", {"inline_keyboard": [[{"text": f"Confirm S${amount:.2f}", "callback_data": f"vs:{session.session_id}:fp"}, {"text": "Edit final price", "callback_data": f"vs:{session.session_id}:cf"}]]})
+        return session
+
+    def begin_final_price_edit(self, session: VendorSession) -> VendorSession:
+        incident, vendor = self._session_context(session)
+        if session.stage not in {"COMPLETION_REVIEW", "CONFIRMING_FINAL_PRICE"}:
+            raise ValueError("Final price can only be changed from the completion review.")
+        session.stage = "CONFIRMING_FINAL_PRICE"
+        self._save_vendor_session(session)
+        self._notify_vendor(
+            incident,
+            vendor,
+            "Changing the final price requires a new confirmed SGD amount. Send it now.",
+            f"completion-price-edit:{session.session_id}:{session.revision}",
+            self._force_reply("Final SGD price, e.g. 220.00"),
+        )
         return session
 
     def confirm_final_price(self, session: VendorSession, event_id: str) -> VendorSession:
@@ -1425,7 +1455,13 @@ class IncidentService:
         session.final_price_confirmed = True
         session.stage = "COMPLETION_REVIEW"
         self._save_vendor_session(session)
-        self._notify_vendor(incident, vendor, f"Review completion\n\nAfter-photo: Attached\nWork performed: {session.completion_scope}\nFinal price: S${session.final_price:.2f}\n\nNothing has been submitted yet.", f"completion-review-final-price:{session.session_id}:{session.revision}")
+        self._notify_vendor(
+            incident,
+            vendor,
+            f"Review completion\n\nAfter-photo: Attached\nWork performed: {session.completion_scope}\nFinal price: S${session.final_price:.2f}\n\nNothing has been submitted yet.",
+            f"completion-review-final-price:{session.session_id}:{session.revision}",
+            {"inline_keyboard": [[{"text": "Submit completion", "callback_data": f"vs:{session.session_id}:cs"}], [{"text": "Replace photo", "callback_data": f"vs:{session.session_id}:cr"}, {"text": "Edit work summary", "callback_data": f"vs:{session.session_id}:ce"}], [{"text": "Change final price", "callback_data": f"vs:{session.session_id}:cf"}, {"text": "Cancel completion draft", "callback_data": f"vs:{session.session_id}:cx"}]]},
+        )
         return session
 
     def process_action(self, incident_id: str, request: ActionRequest) -> Incident:

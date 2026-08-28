@@ -471,16 +471,20 @@ def test_start_completion_evidence_and_tenant_buttons(monkeypatch, service):
     post(client, {"update_id": 2412, "message": {"chat": {"id": 7202}, "text": "Replaced the failed sink seal and tested the joint."}})
     session = service.repository.get_vendor_session(session.session_id)
     assert session is not None
-    post(client, {"update_id": 2413, "callback_query": {"id": "cs-2413", "data": f"vs:{session.session_id}:cs", "message": {"chat": {"id": 7202}}}})
+    assert session.stage == "CONFIRMING_FINAL_PRICE"
+    assert session.final_price_confirmed is False
+    post(client, {"update_id": 2413, "callback_query": {"id": "fp-2413", "data": f"vs:{session.session_id}:fp", "message": {"chat": {"id": 7202}}}})
+    assert service.repository.get_vendor_session(session.session_id).stage == "COMPLETION_REVIEW"
+    post(client, {"update_id": 2414, "callback_query": {"id": "cs-2414", "data": f"vs:{session.session_id}:cs", "message": {"chat": {"id": 7202}}}})
     current = service.get_incident(incident.incident_id)
     assert current.status.value == "PROVISIONALLY_RESOLVED", current.last_evidence.blocking_reasons if current.last_evidence else None
     assert any("Still leaking" in str(message.reply_markup) for message in fake.messages)
     dry_now = post(
         client,
         {
-            "update_id": 2414,
+            "update_id": 2415,
             "callback_query": {
-                "id": "dry-now",
+                "id": "dry-now-2415",
                 "data": f"tenant:{incident.incident_id}:dry",
                 "message": {"chat": {"id": 7101}},
             },
@@ -488,6 +492,51 @@ def test_start_completion_evidence_and_tenant_buttons(monkeypatch, service):
     )
     assert dry_now.json()["kind"] == "tenant_confirmation"
     assert service.get_incident(incident.incident_id).status.value == "CLOSED"
+
+
+def test_completion_final_price_edit_confirm_submit(monkeypatch, service):
+    client, _ = configure(monkeypatch, service)
+    start_report(client, 2420)
+    incident = submit_draft(client, service, 2423)
+    incident = move_vendor_a_timeout(client, service)
+    accept_and_start_vendor_b(client, incident, 2424)
+    session = service.repository.list_vendor_sessions("7202")[0]
+    post(client, {"update_id": 2431, "message": {"chat": {"id": 7202}, "photo": [{"file_id": "vendor-after-edit"}]}})
+    post(client, {"update_id": 2432, "message": {"chat": {"id": 7202}, "text": "Replaced the failed sink seal and tested the joint."}})
+    assert service.repository.get_vendor_session(session.session_id).stage == "CONFIRMING_FINAL_PRICE"
+    post(client, {"update_id": 2433, "callback_query": {"id": "cf-2433", "data": f"vs:{session.session_id}:cf", "message": {"chat": {"id": 7202}}}})
+    assert service.repository.get_vendor_session(session.session_id).stage == "CONFIRMING_FINAL_PRICE"
+    post(client, {"update_id": 2434, "message": {"chat": {"id": 7202}, "text": "225"}})
+    assert service.repository.get_vendor_session(session.session_id).final_price == 225
+    post(client, {"update_id": 2435, "callback_query": {"id": "fp-2435", "data": f"vs:{session.session_id}:fp", "message": {"chat": {"id": 7202}}}})
+    review = service.repository.get_vendor_session(session.session_id)
+    assert review.stage == "COMPLETION_REVIEW" and review.final_price_confirmed is True
+    assert any("Submit completion" in str(message.reply_markup) for message in service.notifications.messages)
+    post(client, {"update_id": 2436, "callback_query": {"id": "cs-2436", "data": f"vs:{session.session_id}:cs", "message": {"chat": {"id": 7202}}}})
+    assert service.get_incident(incident.incident_id).status.value == "PROVISIONALLY_RESOLVED"
+
+
+def test_cancel_completion_draft_keeps_accepted_job_resumable(monkeypatch, service):
+    client, _ = configure(monkeypatch, service)
+    start_report(client, 2440)
+    incident = submit_draft(client, service, 2443)
+    incident = move_vendor_a_timeout(client, service)
+    accept_and_start_vendor_b(client, incident, 2444)
+    session = service.repository.list_vendor_sessions("7202")[0]
+    post(client, {"update_id": 2451, "message": {"chat": {"id": 7202}, "photo": [{"file_id": "vendor-after-cancel"}]}})
+    cancelled = post(client, {"update_id": 2452, "message": {"chat": {"id": 7202}, "text": "/cancel"}})
+    assert cancelled.json()["kind"] == "vendor_cancelled"
+    recovered = service.repository.get_vendor_session(session.session_id)
+    assert recovered.stage == "SUBMITTED" and recovered.cancelled is False
+    assert recovered.completion_photo_ids == [] and recovered.completion_scope is None
+    assert service.get_incident(incident.incident_id).status.value == "IN_PROGRESS"
+    resumed_start = post(client, {"update_id": 2453, "message": {"chat": {"id": 7202}, "text": "/complete"}})
+    assert resumed_start.json()["kind"] == "vendor_completion_started"
+    resumed = post(client, {"update_id": 2454, "message": {"chat": {"id": 7202}, "photo": [{"file_id": "vendor-after-resumed"}]}})
+    assert resumed.json()["kind"] == "completion_photo"
+    cancelled_again = post(client, {"update_id": 2455, "callback_query": {"id": "cx-2455", "data": f"vs:{session.session_id}:cx", "message": {"chat": {"id": 7202}}}})
+    assert cancelled_again.json()["kind"] == "vendor_session_callback"
+    assert service.repository.get_vendor_session(session.session_id).stage == "SUBMITTED"
 
 
 def test_invalid_price_eta_and_photo_keep_the_current_step(monkeypatch, service):
