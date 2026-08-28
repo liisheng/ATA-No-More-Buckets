@@ -27,6 +27,8 @@
 
 ## [PROGRESS]
 
+- 2026-08-28T20:54+08:00 [TOOL] Pushed Luna commits through `291d45d`, staged Cloud Run revision `no-more-buckets-00014-bim` at zero traffic, verified its APIs and rendered live incident, then promoted it to 100% on the existing public URL.
+
 - 2026-08-28T20:29+08:00 [CODE] Removed the per-refresh draft fallback so an applied empty draft snapshot remains authoritative over late older non-empty draft results; added an out-of-order regression test.
 - 2026-08-28T20:25+08:00 [CODE] Live polling now retains the latest successfully applied draft list in a shared ref; empty incident-list responses use that ref, preventing overlapping polls from hiding valid local drafts.
 - 2026-08-28T20:05+08:00 [CODE] Replaced request-start invalidation with per-slice applied-generation tracking so slow successful responses remain eligible until a newer response for that slice is applied; selected-incident guards reject late detail results for superseded incidents.
@@ -54,6 +56,8 @@
 - 2026-08-24T05:46+08:00 [CODE] Final local smoke, Pub/Sub invalid-incident handling, and three Playwright scenarios pass after the last backend hardening change.
 
 ## [DISCOVERIES]
+
+- 2026-08-28T20:33+08:00 [TOOL] Independent release verification found a timing race in `keeps vendor countdowns and outcomes attached to the matching vendor attempt`: the full 14-test Vitest run failed at the final Vendor B fallback assertion because its default one-second wait equals the one-second polling interval. The focused test passed three consecutive isolated runs in about three seconds each, indicating a nondeterministic test synchronization issue rather than evidence of a production countdown regression. Deployment remains withheld until Luna makes the test deterministic and the complete suite passes in one run.
 
 - 2026-08-28T19:21:44+08:00 [TOOL] Live manual report `inc_dc555525fdae` is correctly persisted as `DISPATCHING` with 17 communications, two media assets, Vendor A timed out, and Vendor B pending until 2026-08-28T19:29:07+08:00. The deployed page nevertheless remains in its waiting state because `refreshLiveIncident()` awaits `/api/incidents` and the intentionally disabled live `/api/drafts` endpoint in one `Promise.all`; the expected draft `404` rejects the entire refresh and surfaces its JSON error instead of rendering the incident.
 - 2026-08-28T18:36:42+08:00 [CODE] Supersedes the fully-ready UI implication of the 18:35 release entry: `frontend/src/App.tsx` selects the first `vendor_timeout_scheduled` event rather than the event matching the current pending attempt, and the vendor proof rows hard-code any pending attempt as Vendor A. During real Vendor B's 600-second window the console can therefore show Vendor A at `0s` and Vendor B on standby even though backend/Telegram state is correct.
@@ -94,6 +98,8 @@
 - 2026-08-25T23:41+08:00 [TOOL] Pub/Sub publishing is part of the cloud adapter, but end-to-end push delivery to `/api/events/pubsub` additionally requires a push subscription; workflow progression itself uses Cloud Tasks and does not depend on that subscription.
 
 ## [OUTCOMES]
+
+- 2026-08-28T20:54+08:00 [TOOL] Live polling release is verified: backend 62 passed/1 skipped, Ruff, mypy, frontend lint, three consecutive 14-test Vitest runs, production build, and 3 Playwright scenarios pass. Production renders `inc_dc555525fdae` with tenant/vendor lanes and media instead of the private-drafts 404/waiting state; runtime uses Firestore, Telegram, and exact `gemini-3.5-flash`; Telegram has zero pending updates/no last error; Cloud Tasks is RUNNING; and revision `00014-bim` has no error logs.
 
 - 2026-08-28T20:29+08:00 [TOOL] Verification for the draft-authority follow-up passes: frontend lint, 14 Vitest tests, production build, 3 Playwright scenarios, backend 62 passed/1 skipped, Ruff, mypy, and `git diff --check`.
 - 2026-08-28T20:25+08:00 [TOOL] Verification for the overlapping-draft follow-up passes: frontend lint, 13 Vitest tests, production build, 3 Playwright scenarios, backend 62 passed/1 skipped, Ruff, mypy, and `git diff --check`.
