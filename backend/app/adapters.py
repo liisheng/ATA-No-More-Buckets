@@ -617,11 +617,11 @@ class TelegramVendorAdapter:
                 [
                     {
                         "text": "Accept",
-                        "callback_data": f"vendor:{work_order.incident_id}:accept",
+                        "callback_data": f"vs:{work_order.vendor_session_id}:ac" if work_order.vendor_session_id else f"vendor:{work_order.incident_id}:accept",
                     },
                     {
                         "text": "Decline",
-                        "callback_data": f"vendor:{work_order.incident_id}:decline",
+                        "callback_data": f"vs:{work_order.vendor_session_id}:dc" if work_order.vendor_session_id else f"vendor:{work_order.incident_id}:decline",
                     },
                 ]
             ]

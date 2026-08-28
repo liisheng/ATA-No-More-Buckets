@@ -998,8 +998,10 @@ class IncidentService:
             self._save(incident)
             return
         vendor = candidates[0]
-        if vendor.telegram_chat_id and getattr(self.vendors_adapter, "is_human_vendor", lambda _v: False)(vendor):
-            self.create_vendor_session(incident, vendor)
+        if vendor.telegram_chat_id:
+            session = self.create_vendor_session(incident, vendor)
+            if incident.work_order:
+                incident.work_order.vendor_session_id = session.session_id
         assert incident.work_order is not None
         vendor_channel = getattr(self.vendors_adapter, "provider_name", "vendor_adapter")
         try:
@@ -1147,11 +1149,8 @@ class IncidentService:
         return self.repository.get_vendor_session(session_id)
 
     def create_vendor_session(self, incident: Incident, vendor: Vendor) -> VendorSession:
-        existing = next(
-            (s for s in self.repository.list_vendor_sessions(vendor.telegram_chat_id or "")
-             if s.incident_id == incident.incident_id and s.vendor_id == vendor.vendor_id
-             and not s.cancelled),
-            None,
+        existing = self.repository.find_vendor_session(
+            vendor.telegram_chat_id or "", vendor.vendor_id, incident.incident_id
         )
         if existing:
             return existing
@@ -1172,6 +1171,16 @@ class IncidentService:
         self.repository.save_vendor_session(session)
         return session
 
+    def _terminalize_vendor_session(self, incident_id: str, vendor_id: str, stage: str) -> None:
+        vendor = next((candidate for candidate in self.vendors if candidate.vendor_id == vendor_id), None)
+        if not vendor:
+            return
+        session = self.repository.find_vendor_session(vendor.telegram_chat_id or "", vendor_id, incident_id)
+        if session and session.stage not in {"DECLINED", "TIMED_OUT", "RELEASED", "COMPLETED"}:
+            session.stage = stage  # type: ignore[assignment]
+            session.cancelled = True
+            self._save_vendor_session(session)
+
     def _session_context(self, session: VendorSession) -> tuple[Incident, Vendor]:
         incident = self._get(session.incident_id)
         vendor = next((v for v in self.vendors if v.vendor_id == session.vendor_id), None)
@@ -1181,7 +1190,7 @@ class IncidentService:
 
     @staticmethod
     def _force_reply(placeholder: str) -> dict[str, Any]:
-        return {"force_reply": True, "input_field_placeholder": placeholder, "selective": True}
+        return {"force_reply": True, "input_field_placeholder": placeholder}
 
     def accept_vendor_session(self, session: VendorSession) -> VendorSession:
         incident, vendor = self._session_context(session)
@@ -1283,7 +1292,7 @@ class IncidentService:
             f"vendor-session-review:{session.session_id}:{session.revision}",
             {"inline_keyboard": [[{"text": "Submit quote and ETA", "callback_data": f"vs:{session.session_id}:su"}],
              [{"text": "Edit price", "callback_data": f"vs:{session.session_id}:pe"}, {"text": "Edit ETA", "callback_data": f"vs:{session.session_id}:ee"}],
-             [{"text": "Release job", "callback_data": f"vs:{session.session_id}:cx"}]]},
+             [{"text": "Reset intake", "callback_data": f"vs:{session.session_id}:cx"}]]},
         )
         return session
 
@@ -1317,7 +1326,7 @@ class IncidentService:
                 current, vendor,
                 f"✅ Quote and ETA submitted\n\nQuote: S${session.draft_price:.2f}\nArrival ETA: {session.draft_eta} minutes\n\nTravel to the property. When you arrive, tap Start job.",
                 f"vendor-submitted:{session.session_id}",
-                {"inline_keyboard": [[{"text": "Start job", "callback_data": f"vendor:{incident.incident_id}:start"}]]},
+                {"inline_keyboard": [[{"text": "Start job", "callback_data": f"vs:{session.session_id}:st"}]]},
             )
         return session
 
@@ -1371,13 +1380,20 @@ class IncidentService:
         incident, vendor = self._session_context(session)
         if incident.status.value != "IN_PROGRESS" or not session.submitted:
             raise ValueError("Completion is available after Start job.")
-        session.stage = "AWAITING_PHOTO"
-        self._save_vendor_session(session)
         self._notify_vendor(
             incident, vendor,
-            "🛠 Job started\n\nWhen the repair is finished:\n\n1. Reply with one clear after-photo showing the repaired area.\n2. Send a short description of the work performed.\n3. Review the final price and evidence.\n4. Tap Submit completion.\n\nRequired: one after-photo, work-performed summary, confirmed final price.\n\n📷 Completion step 1 of 2\n\nReply to this message with one clear after-photo showing the repaired area and surrounding surface.",
-            f"completion-photo-prompt:{session.session_id}", self._force_reply("Attach one clear after-photo"),
+            "🛠 Job started\n\nComplete the bounded repair within the confirmed scope and price.\n\nWhen the repair is finished, tap Prepare completion. You will need:\n\n• One clear after-photo\n• A 10–500 character work summary\n• Confirmation of the final price",
+            f"completion-ready:{session.session_id}", {"inline_keyboard": [[{"text": "Prepare completion", "callback_data": f"vs:{session.session_id}:pr"}]]},
         )
+        return session
+
+    def begin_completion(self, session: VendorSession) -> VendorSession:
+        incident, vendor = self._session_context(session)
+        if incident.status.value != "IN_PROGRESS" or not session.submitted or session.stage != "SUBMITTED":
+            raise ValueError("Completion is available after Start job.")
+        session.stage = "AWAITING_PHOTO"
+        self._save_vendor_session(session)
+        self._notify_vendor(incident, vendor, "📷 Completion step 1 of 2\n\nReply to this message with one clear after-photo showing the repaired area and surrounding surface.", f"completion-photo-prompt:{session.session_id}", self._force_reply("Attach one clear after-photo"))
         return session
 
     def completion_photo(self, session: VendorSession, media: list[Any]) -> VendorSession:
@@ -1394,7 +1410,6 @@ class IncidentService:
         session.completion_photo_ids = [photo.asset_id]
         session.stage = "AWAITING_SCOPE"
         self._save_vendor_session(session)
-        self.record_communication(communication_id=f"comm:vendor-session:{session.session_id}:photo:{session.revision}", incident_id=incident.incident_id, sender_role="vendor", sender_id=vendor.vendor_id, recipient_role="agent", recipient_id="no-more-buckets", channel="telegram", direction="inbound", message_type="image", text="Completion after-photo attached.", media_ids=[photo.asset_id], provider_message_id=photo.asset_id, delivery_status="received")
         self._notify_vendor(incident, vendor, "📝 Completion step 2 of 2\n\nBriefly describe what you repaired and any part replaced.\n\nExample:\nReplaced the failed sink seal and tested the joint with the water running.", f"completion-scope-prompt:{session.session_id}", self._force_reply("Describe work performed (10–500 characters)"))
         return session
 
@@ -1430,8 +1445,9 @@ class IncidentService:
         invoice = Invoice(invoice_id=f"invoice_{incident.incident_id}_{event_id}", vendor_id=vendor.vendor_id, currency="SGD", total=session.final_price, line_items=[InvoiceLineItem(description=f"repair work: {session.completion_scope}", quantity=1, unit_price=session.final_price)])
         current = self.process_action(incident.incident_id, ActionRequest(action="completion", event_id=event_id, payload={"photo": photo.model_dump(), "invoice": invoice.model_dump()}))
         session.submitted = True
-        session.stage = "SUBMITTED"
+        session.stage = "COMPLETED"
         self._save_vendor_session(session)
+        self._notify_vendor(current, vendor, "✅ Completion submitted\n\nThe evidence passed initial validation and has been sent to the tenant.\n\nWaiting for the tenant to confirm the repair is dry.", f"completion-submitted:{session.session_id}")
         return current
 
     def change_final_price(self, session: VendorSession, amount: float) -> VendorSession:
@@ -1466,6 +1482,12 @@ class IncidentService:
             raise ValueError("There is no final price awaiting confirmation.")
         if incident.work_order and session.final_price > incident.work_order.authorized_amount:
             self.process_action(incident.incident_id, ActionRequest(action="vendor_quote", event_id=f"{event_id}:approval", payload={"vendor_id": vendor.vendor_id, "amount": session.final_price}))
+            current = self._get(incident.incident_id)
+            if current.approval and current.approval.status == "pending":
+                session.stage = "AWAITING_FINAL_APPROVAL"
+                self._save_vendor_session(session)
+                self._notify_vendor(current, vendor, "⚠️ Final price approval is pending. Your completion draft is saved; Submit completion is unavailable until a manager approves it.", f"completion-approval-pending:{session.session_id}")
+                return session
         session.final_price_confirmed = True
         session.stage = "COMPLETION_REVIEW"
         self._save_vendor_session(session)
@@ -1571,6 +1593,7 @@ class IncidentService:
                 )
             elif pending_attempt and incident.status == IncidentStatus.DISPATCHING:
                 pending_attempt.outcome = "timed_out"
+                self._terminalize_vendor_session(incident.incident_id, vendor_id, "TIMED_OUT")
                 self._timeline(
                     incident,
                     "vendor_timeout_received",
@@ -1640,6 +1663,7 @@ class IncidentService:
                 self._accept_vendor(incident, vendor, request.event_id)
             elif outcome == "decline":
                 pending_attempt.outcome = "declined"
+                self._terminalize_vendor_session(incident.incident_id, vendor_id, "DECLINED")
                 self._timeline(
                     incident,
                     "vendor_dispatch_outcome",
@@ -2076,6 +2100,14 @@ class IncidentService:
             self._transition(
                 incident, IncidentStatus.SCHEDULED, "MANAGER_APPROVED_OVER_LIMIT", event_id
             )
+            vendor = next((candidate for candidate in self.vendors if candidate.vendor_id == incident.assigned_vendor_id), None)
+            if vendor:
+                session = self.repository.find_vendor_session(vendor.telegram_chat_id or "", vendor.vendor_id, incident.incident_id)
+                if session and session.stage == "AWAITING_FINAL_APPROVAL":
+                    session.final_price_confirmed = True
+                    session.stage = "COMPLETION_REVIEW"
+                    self._save_vendor_session(session)
+                    self._notify_vendor(incident, vendor, "✅ Final price approved. Review the saved completion and submit when ready.", f"completion-approval-approved:{session.session_id}", {"inline_keyboard": [[{"text": "Submit completion", "callback_data": f"vs:{session.session_id}:cs"}]]})
             return
         self._transition(
             incident, IncidentStatus.DISPATCHING, "MANAGER_APPROVED_OVER_LIMIT", event_id

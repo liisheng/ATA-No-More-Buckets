@@ -249,7 +249,12 @@ class VendorSession(StrictModel):
         "AWAITING_SCOPE",
         "COMPLETION_REVIEW",
         "CONFIRMING_FINAL_PRICE",
+        "AWAITING_FINAL_APPROVAL",
         "CANCELLED",
+        "DECLINED",
+        "TIMED_OUT",
+        "RELEASED",
+        "COMPLETED",
     ] = "OFFERED"
     draft_price: float | None = Field(default=None, ge=0)
     price_confirmed: bool = False
@@ -287,6 +292,7 @@ class WorkOrder(StrictModel):
     status: Literal["bounded", "approval_required", "dispatched", "completed"] = "bounded"
     approved: bool = False
     vendor_id: str | None = None
+    vendor_session_id: str | None = None
 
 
 class ApprovalRequest(StrictModel):

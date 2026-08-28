@@ -48,6 +48,8 @@ class IncidentRepository(Protocol):
 
     def list_vendor_sessions(self, telegram_chat_id: str) -> builtins.list[VendorSession]: ...
 
+    def find_vendor_session(self, telegram_chat_id: str, vendor_id: str, incident_id: str) -> VendorSession | None: ...
+
     def move_communications(self, source_incident_id: str, target_incident_id: str) -> None: ...
 
     def claim_idempotency(self, key: str, incident_id: str) -> str | None: ...
@@ -165,6 +167,9 @@ class InMemoryIncidentRepository:
             key=lambda s: s.updated_at,
             reverse=True,
         )
+
+    def find_vendor_session(self, telegram_chat_id: str, vendor_id: str, incident_id: str) -> VendorSession | None:
+        return next((session for session in self.list_vendor_sessions(telegram_chat_id) if session.vendor_id == vendor_id and session.incident_id == incident_id), None)
 
     def move_communications(self, source_incident_id: str, target_incident_id: str) -> None:
         for record in self._communications.values():
@@ -338,6 +343,9 @@ class FirestoreIncidentRepository:
             if value.get("telegram_chat_id") == telegram_chat_id:
                 sessions.append(VendorSession.model_validate(value))
         return sorted(sessions, key=lambda s: s.updated_at, reverse=True)
+
+    def find_vendor_session(self, telegram_chat_id: str, vendor_id: str, incident_id: str) -> VendorSession | None:
+        return next((session for session in self.list_vendor_sessions(telegram_chat_id) if session.vendor_id == vendor_id and session.incident_id == incident_id), None)
 
     def move_communications(self, source_incident_id: str, target_incident_id: str) -> None:
         for snapshot in self.communications.stream():

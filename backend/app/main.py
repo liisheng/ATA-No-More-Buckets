@@ -201,11 +201,17 @@ def _vendor_for_chat(chat_id: str) -> Vendor | None:
     return next((vendor for vendor in service.vendors if vendor.telegram_chat_id == chat_id), None)
 
 
-def _vendor_session_for_chat(chat_id: str, session_id: str | None = None) -> VendorSession | None:
-    sessions = [s for s in service.repository.list_vendor_sessions(chat_id) if not s.cancelled]
+def _vendor_session_for_chat(chat_id: str, session_id: str | None = None, incident_id: str | None = None, vendor_id: str | None = None) -> VendorSession | None:
+    if incident_id and vendor_id:
+        return service.repository.find_vendor_session(chat_id, vendor_id, incident_id)
+    terminal_incidents = {"ESCALATED", "CLOSED", "CANCELLED", "PROVISIONALLY_RESOLVED"}
+    sessions = [s for s in service.repository.list_vendor_sessions(chat_id)
+                if not s.cancelled and s.stage not in {"CANCELLED", "DECLINED", "TIMED_OUT", "RELEASED", "COMPLETED"}
+                and (incident := service.repository.get(s.incident_id)) is not None
+                and incident.status.value not in terminal_incidents]
     if session_id:
         return next((s for s in sessions if s.session_id == session_id), None)
-    active = [s for s in sessions if s.stage not in {"SUBMITTED", "CANCELLED"}]
+    active = [s for s in sessions if s.stage != "SUBMITTED" or service.get_incident(s.incident_id).status.value in {"SCHEDULED", "IN_PROGRESS"}]
     if len(active) == 1:
         return active[0]
     return sessions[0] if len(sessions) == 1 else None
@@ -222,6 +228,7 @@ def _vendor_help(session: VendorSession | None) -> str:
         "CONFIRMING_ETA": "Tap the ETA confirmation, Edit ETA, or Back to price.",
         "REVIEW": "Review the quote and ETA, then tap Submit quote and ETA.",
         "SUBMITTED": "Tap Start job when you arrive. When the repair is finished, send /complete.",
+        "AWAITING_FINAL_APPROVAL": "The final price is awaiting manager approval; your completion draft is saved.",
         "AWAITING_PHOTO": "Attach one clear after-photo.",
         "AWAITING_SCOPE": "Send a 10–500 character work summary.",
         "CONFIRMING_FINAL_PRICE": "Confirm the final price, or tap Change final price and send a new amount.",
@@ -811,22 +818,27 @@ def telegram_webhook(
             if not vendor or not session or session.vendor_id != vendor.vendor_id:
                 _answer_callback(callback.get("id"), "This vendor session is no longer current.", True)
                 return {"status": "processed", "kind": "stale_vendor_callback"}
-            service.record_communication(
-                communication_id=f"comm:vendor-session:{session.session_id}:button:{parts[2]}:{session.revision}",
-                incident_id=session.incident_id,
-                sender_role="vendor",
-                sender_id=vendor.vendor_id,
-                recipient_role="agent",
-                recipient_id="no-more-buckets",
-                channel="telegram",
-                direction="inbound",
-                message_type="button",
-                text=parts[2],
-                provider_message_id=provider_message_id,
-                delivery_status="received",
-            )
             try:
-                if parts[2] == "pc":
+                if parts[2] == "ac":
+                    incident = service.get_incident(session.incident_id)
+                    if session.stage != "OFFERED" or incident.status.value != "DISPATCHING":
+                        raise ValueError("This offer is no longer current.")
+                    service.process_action(session.incident_id, ActionRequest(action="vendor_response", event_id=f"telegram-action-{update_id}", payload={"vendor_id": vendor.vendor_id, "outcome": "accept"}))
+                    service.accept_vendor_session(session)
+                elif parts[2] == "dc":
+                    incident = service.get_incident(session.incident_id)
+                    if session.stage != "OFFERED" or incident.status.value != "DISPATCHING":
+                        raise ValueError("This offer is no longer current.")
+                    service.process_action(session.incident_id, ActionRequest(action="vendor_response", event_id=f"telegram-action-{update_id}", payload={"vendor_id": vendor.vendor_id, "outcome": "decline"}))
+                    session.stage = "DECLINED"
+                    session.cancelled = True
+                    service._save_vendor_session(session)
+                elif parts[2] == "st":
+                    service.start_vendor_job(session, f"telegram-action-{update_id}")
+                    service.prepare_completion(session)
+                elif parts[2] == "pr":
+                    service.begin_completion(session)
+                elif parts[2] == "pc":
                     service.confirm_vendor_price(session)
                 elif parts[2] == "ec":
                     service.confirm_vendor_eta(session)
@@ -865,8 +877,16 @@ def telegram_webhook(
                     service.submit_completion(session, f"telegram-action-{update_id}")
                 else:
                     raise ValueError("unknown vendor session action")
-            except (ValueError, KeyError):
+            except (ValueError, KeyError, IncidentNotFound):
                 _answer_callback(callback.get("id"), _vendor_help(session), True)
+                return {"status": "processed", "kind": "stale_vendor_callback"}
+            service.record_communication(
+                communication_id=f"comm:vendor-session:{session.session_id}:button:{parts[2]}:{provider_message_id}",
+                incident_id=session.incident_id, sender_role="vendor", sender_id=vendor.vendor_id,
+                recipient_role="agent", recipient_id="no-more-buckets", channel="telegram",
+                direction="inbound", message_type="button", text=parts[2],
+                provider_message_id=provider_message_id, delivery_status="received",
+            )
             _answer_callback(callback.get("id"))
             return {"status": "processed", "kind": "vendor_session_callback"}
 
@@ -879,53 +899,39 @@ def telegram_webhook(
         ):
             raise HTTPException(status_code=422, detail="unrecognized Telegram callback")
         try:
-            callback_incident = service.get_incident(parts[1])
-        except IncidentNotFound as exc:
-            raise HTTPException(status_code=422, detail="callback incident is unavailable") from exc
-        if not (
-            callback_incident.assigned_vendor_id == vendor.vendor_id
-            or any(
-                attempt.vendor_id == vendor.vendor_id
-                for attempt in callback_incident.vendor_attempts
-            )
-        ):
-            raise HTTPException(status_code=422, detail="vendor is not assigned to this incident")
+            service.get_incident(parts[1])
+            session = _vendor_session_for_chat(chat_id, incident_id=parts[1], vendor_id=vendor.vendor_id)
+            if not session:
+                raise ValueError("This offer is no longer current.")
+        except (IncidentNotFound, ValueError):
+            _answer_callback(callback.get("id"), "This job is no longer current. Use /status for the current step.", True)
+            return {"status": "processed", "kind": "stale_vendor_callback"}
         action: Literal["work_started", "vendor_response"] = (
             "work_started" if parts[2] == "start" else "vendor_response"
         )
+        try:
+            if parts[2] != "start":
+                service.process_action(parts[1], ActionRequest(action=action, event_id=f"telegram-action-{update_id}", payload={"vendor_id": vendor.vendor_id, "outcome": parts[2]}))
+                if parts[2] == "accept":
+                    service.accept_vendor_session(session)
+                else:
+                    session.stage = "DECLINED"
+                    session.cancelled = True
+                    service._save_vendor_session(session)
+            else:
+                service.start_vendor_job(session, f"telegram-action-{update_id}")
+                service.prepare_completion(session)
+        except (ValueError, KeyError, IncidentNotFound):
+            _answer_callback(callback.get("id"), _vendor_help(session), True)
+            return {"status": "processed", "kind": "stale_vendor_callback"}
         service.record_communication(
-            communication_id=f"comm:telegram:{update_id}:vendor-button",
-            incident_id=parts[1],
-            sender_role="vendor",
-            sender_id=vendor.vendor_id,
-            recipient_role="agent",
-            recipient_id="no-more-buckets",
-            channel="telegram",
-            direction="inbound",
-            message_type="button",
-            text=parts[2].title(),
-            provider_message_id=provider_message_id,
-            delivery_status="received",
+            communication_id=f"comm:telegram:{parts[1]}:{update_id}:vendor-button",
+            incident_id=parts[1], sender_role="vendor", sender_id=vendor.vendor_id,
+            recipient_role="agent", recipient_id="no-more-buckets", channel="telegram",
+            direction="inbound", message_type="button", text=parts[2].title(),
+            provider_message_id=provider_message_id, delivery_status="received",
         )
-        if parts[2] != "start":
-            service.process_action(
-                parts[1],
-                ActionRequest(
-                    action=action,
-                    event_id=f"telegram-action-{update_id}",
-                    payload={"vendor_id": vendor.vendor_id, "outcome": parts[2]},
-                ),
-            )
-        session = _vendor_session_for_chat(chat_id)
-        if parts[2] == "accept" and session and session.incident_id == parts[1] and session.stage == "OFFERED":
-            service.accept_vendor_session(session)
-        elif parts[2] == "start" and session and session.incident_id == parts[1]:
-            service.start_vendor_job(session, f"telegram-action-{update_id}")
-            service.prepare_completion(session)
-        if hasattr(service.notifications, "answer_callback") and isinstance(
-            callback.get("id"), str
-        ):
-            service.notifications.answer_callback(callback["id"])
+        _answer_callback(callback.get("id"))
         return {"status": "processed", "kind": "vendor_callback"}
 
     message = update.get("message")
@@ -937,7 +943,8 @@ def telegram_webhook(
     tenant = _tenant_for_chat(chat_id)
     vendor = _vendor_for_chat(chat_id)
     command_parts = text.split(maxsplit=1)
-    command = command_parts[0].casefold() if command_parts else ""
+    command = command_parts[0].casefold().split("@", 1)[0] if command_parts else ""
+    command_argument = command_parts[1] if len(command_parts) == 2 else ""
 
     if command == "/start":
         if len(command_parts) == 2:
@@ -1179,13 +1186,13 @@ def telegram_webhook(
         if not vendor_incident:
             service.notifications.send(NotificationMessage("vendor", chat_id, "There is no active vendor work. Use /help for instructions.", f"vendor-no-active:{chat_id}"))
             return {"status": "processed", "kind": "no_active_vendor_work"}
-        session = _vendor_session_for_chat(chat_id)
+        session = _vendor_session_for_chat(chat_id, incident_id=vendor_incident.incident_id, vendor_id=vendor.vendor_id)
         if not session:
             service.notifications.send(NotificationMessage(vendor_incident.incident_id, chat_id, "I can’t identify one active vendor session. Use /status from the current work-order message.", f"vendor-session-ambiguous:{chat_id}"))
             return {"status": "processed", "kind": "vendor_session_required"}
         media = _telegram_media(message, "vendor")
         service.record_communication(
-            communication_id=f"comm:telegram:{update_id}:vendor-message",
+            communication_id=f"comm:telegram:{vendor_incident.incident_id}:{update_id}:{provider_message_id}:{','.join(asset.asset_id for asset in media) or 'text'}",
             incident_id=vendor_incident.incident_id,
             sender_role="vendor",
             sender_id=vendor.vendor_id,
@@ -1219,7 +1226,7 @@ def telegram_webhook(
             return {"status": "processed", "kind": "vendor_cancelled"}
         if command == "/complete":
             try:
-                service.prepare_completion(session)
+                service.begin_completion(session)
             except ValueError:
                 service._notify_vendor(vendor_incident, vendor, _vendor_help(session), f"vendor-complete-invalid:{session.session_id}:{session.revision}")
                 return {"status": "processed", "kind": "vendor_step_help"}
@@ -1237,19 +1244,20 @@ def telegram_webhook(
             else:
                 service.change_final_price(session, amount)
             return {"status": "processed", "kind": "completion_final_price"}
+        intake_text = f"PRICE {command_argument}" if command == "/price" else f"ETA {command_argument}" if command == "/eta" else text
         if session.stage in {"AWAITING_PRICE", "CONFIRMING_PRICE"}:
-            legacy = parse_telegram_legacy_vendor_input(text)
+            legacy = parse_telegram_legacy_vendor_input(intake_text)
             if legacy:
                 service.legacy_vendor_input(session, legacy[0], legacy[1])
                 return {"status": "processed", "kind": "vendor_legacy_draft"}
-            amount = parse_telegram_price(text)
+            amount = parse_telegram_price(intake_text)
             if amount is None:
                 service._notify_vendor(vendor_incident, vendor, "❌ I couldn’t use that price.\n\nSend one SGD amount, for example:\n220\nPRICE 220.50\n\nThe S$250 autonomous limit still applies.", f"vendor-price-invalid:{session.session_id}:{session.revision}", service._force_reply("SGD amount, e.g. 220.00"))
             else:
                 service.vendor_price(session, amount)
             return {"status": "processed", "kind": "vendor_price"}
         if session.stage in {"AWAITING_ETA", "CONFIRMING_ETA"}:
-            minutes = parse_telegram_eta(text)
+            minutes = parse_telegram_eta(intake_text)
             if minutes is None:
                 service._notify_vendor(vendor_incident, vendor, "❌ I couldn’t use that arrival ETA.\n\nSend a whole number from 1 to 1440 minutes, for example:\n20\nETA 20\n20 minutes", f"vendor-eta-invalid:{session.session_id}:{session.revision}", service._force_reply("Minutes until arrival, e.g. 20"))
             else:

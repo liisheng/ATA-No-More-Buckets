@@ -32,6 +32,8 @@
 
 ## [PROGRESS]
 
+- 2026-08-28T22:55+08:00 [CODE] Bound vendor Telegram callbacks and text intake to persisted chat/vendor/incident sessions; terminalized declined/timed-out/completed sessions; corrected group ForceReply markup and added the explicit Start job → Prepare completion boundary. Completion-photo handling now reuses the inbound Telegram communication record, and final-price approval withholds completion submission.
+
 - 2026-08-28T22:35+08:00 [CODE] Accepted vendor intake cancellation now resets unsubmitted quote/ETA work to `AWAITING_PRICE` while preserving the scheduled assignment; premature `/complete` returns current-step guidance instead of propagating `ValueError`.
 
 - 2026-08-28T22:20+08:00 [CODE] Fixed Telegram completion state pairing: final-price edits enter `CONFIRMING_FINAL_PRICE`, confirmed prices return to a review with Submit completion, and `/complete` resumes evidence collection after a completion-draft cancellation.
@@ -65,6 +67,8 @@
 - 2026-08-24T05:46+08:00 [CODE] Final local smoke, Pub/Sub invalid-incident handling, and three Playwright scenarios pass after the last backend hardening change.
 
 ## [DISCOVERIES]
+
+- 2026-08-28T22:44+08:00 [CODE] Guided vendor wizard release review found live-demo blockers despite green tests: `_vendor_session_for_chat` becomes ambiguous after multiple submitted historical sessions and the legacy Start callback does not carry a session id; ForceReply sets `selective=true` without mentioning or replying to a specific user; Decline/timeout do not terminalize the offered session; the `Release job` button invokes intake reset rather than releasing the assignment; legacy vendor callbacks can propagate `ValueError`; and completion photos are recorded by both webhook intake and wizard/completion handlers. Successful completion also lacks the promised vendor notification that tenant confirmation is pending.
 
 - 2026-08-28T20:33+08:00 [TOOL] Independent release verification found a timing race in `keeps vendor countdowns and outcomes attached to the matching vendor attempt`: the full 14-test Vitest run failed at the final Vendor B fallback assertion because its default one-second wait equals the one-second polling interval. The focused test passed three consecutive isolated runs in about three seconds each, indicating a nondeterministic test synchronization issue rather than evidence of a production countdown regression. Deployment remains withheld until Luna makes the test deterministic and the complete suite passes in one run.
 
@@ -107,6 +111,8 @@
 - 2026-08-25T23:41+08:00 [TOOL] Pub/Sub publishing is part of the cloud adapter, but end-to-end push delivery to `/api/events/pubsub` additionally requires a push subscription; workflow progression itself uses Cloud Tasks and does not depend on that subscription.
 
 ## [OUTCOMES]
+
+- 2026-08-28T22:44+08:00 [TOOL] Independent candidate checks pass (backend 91 passed/1 skipped, Ruff, mypy, frontend lint, two consecutive 14-test Vitest runs, production build, 3 Playwright scenarios, and `git diff --check`), but deployment is withheld pending the vendor group/session correctness follow-up identified in code review.
 
 - 2026-08-28T22:35+08:00 [TOOL] Follow-up verification passes: full backend pytest, Ruff, mypy, and `git diff --check`; integration coverage includes pre-quote cancellation and premature `/complete`.
 

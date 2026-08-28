@@ -151,6 +151,8 @@ def accept_and_start_vendor_b(client: TestClient, incident, update_id: int):
     post(client, {"update_id": update_id + 5, "callback_query": {"id": f"su-{update_id}", "data": f"vs:{session.session_id}:su", "message": {"chat": {"id": 7202}}}})
     start = post(client, {"update_id": update_id + 6, "callback_query": {"id": f"start-{update_id}", "data": f"vendor:{incident.incident_id}:start", "message": {"chat": {"id": 7202}}}})
     assert start.json()["kind"] == "vendor_callback"
+    prepared = post(client, {"update_id": update_id + 70, "callback_query": {"id": f"prepare-{update_id}", "data": f"vs:{session.session_id}:pr", "message": {"chat": {"id": 7202}}}})
+    assert prepared.json()["kind"] == "vendor_session_callback"
 
 
 def test_text_photo_voice_updates_create_exactly_one_incident_and_duplicates_are_safe(
@@ -466,6 +468,7 @@ def test_start_completion_evidence_and_tenant_buttons(monkeypatch, service):
     assert before_submit.eta is None and before_submit.work_order and before_submit.work_order.estimated_cost != 220
     post(client, {"update_id": 2409, "callback_query": {"id": "su-2409", "data": f"vs:{session.session_id}:su", "message": {"chat": {"id": 7202}}}})
     post(client, {"update_id": 2410, "callback_query": {"id": "start-2410", "data": f"vendor:{incident.incident_id}:start", "message": {"chat": {"id": 7202}}}})
+    post(client, {"update_id": 24101, "callback_query": {"id": "prepare-2410", "data": f"vs:{session.session_id}:pr", "message": {"chat": {"id": 7202}}}})
     photo = post(client, {"update_id": 2411, "message": {"chat": {"id": 7202}, "photo": [{"file_id": "vendor-after"}]}})
     assert photo.json()["kind"] == "completion_photo"
     post(client, {"update_id": 2412, "message": {"chat": {"id": 7202}, "text": "Replaced the failed sink seal and tested the joint."}})
