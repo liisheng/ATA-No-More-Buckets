@@ -230,6 +230,42 @@ class TelegramDraft(StrictModel):
     revision: int = Field(default=0, ge=0)
 
 
+class VendorSession(StrictModel):
+    """Persisted Telegram wizard state for one vendor and incident."""
+
+    session_id: str = Field(default_factory=lambda: f"vs_{uuid4().hex[:20]}")
+    incident_id: str
+    vendor_id: str
+    telegram_chat_id: str
+    stage: Literal[
+        "OFFERED",
+        "AWAITING_PRICE",
+        "CONFIRMING_PRICE",
+        "AWAITING_ETA",
+        "CONFIRMING_ETA",
+        "REVIEW",
+        "SUBMITTED",
+        "AWAITING_PHOTO",
+        "AWAITING_SCOPE",
+        "COMPLETION_REVIEW",
+        "CONFIRMING_FINAL_PRICE",
+        "CANCELLED",
+    ] = "OFFERED"
+    draft_price: float | None = Field(default=None, ge=0)
+    price_confirmed: bool = False
+    draft_eta: int | None = Field(default=None, ge=1, le=1440)
+    eta_confirmed: bool = False
+    completion_photo_ids: list[str] = Field(default_factory=list, max_length=5)
+    completion_scope: str | None = Field(default=None, max_length=500)
+    final_price: float | None = Field(default=None, ge=0)
+    final_price_confirmed: bool = False
+    revision: int = Field(default=0, ge=0)
+    submitted: bool = False
+    cancelled: bool = False
+    created_at: datetime
+    updated_at: datetime
+
+
 class VendorAttempt(StrictModel):
     vendor_id: str
     outcome: Literal["pending", "accepted", "declined", "timed_out"]

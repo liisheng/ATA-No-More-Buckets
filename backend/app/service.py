@@ -32,6 +32,8 @@ from .models import (
     CompletionEvidence,
     Incident,
     IncidentStatus,
+    Invoice,
+    InvoiceLineItem,
     PairingCodeRecord,
     PairingCodeResponse,
     PropertyConfig,
@@ -44,6 +46,7 @@ from .models import (
     TimelineEntry,
     Vendor,
     VendorAttempt,
+    VendorSession,
 )
 from .policies import (
     assess_completion,
@@ -966,25 +969,6 @@ class IncidentService:
             f"{vendor.name} accepted the bounded repair.{eta_message}",
             f"vendor-accepted:{vendor.vendor_id}",
         )
-        self._notify_vendor(
-            incident,
-            vendor,
-            (
-                "Accepted. Tap Start job when you arrive. Then send one after-photo with this caption:\n"
-                "COMPLETE\nPRICE <amount>\nSCOPE <work performed>"
-            ),
-            f"vendor-start-instructions:{vendor.vendor_id}",
-            reply_markup={
-                "inline_keyboard": [
-                    [
-                        {
-                            "text": "Start job",
-                            "callback_data": f"vendor:{incident.incident_id}:start",
-                        }
-                    ]
-                ]
-            },
-        )
 
     def _dispatch_next(self, incident: Incident, trigger_event_id: str) -> None:
         if incident.status not in {
@@ -1014,6 +998,8 @@ class IncidentService:
             self._save(incident)
             return
         vendor = candidates[0]
+        if vendor.telegram_chat_id and getattr(self.vendors_adapter, "is_human_vendor", lambda _v: False)(vendor):
+            self.create_vendor_session(incident, vendor)
         assert incident.work_order is not None
         vendor_channel = getattr(self.vendors_adapter, "provider_name", "vendor_adapter")
         try:
@@ -1156,6 +1142,291 @@ class IncidentService:
         if not incident:
             raise IncidentNotFound(incident_id)
         return incident
+
+    def get_vendor_session(self, session_id: str) -> VendorSession | None:
+        return self.repository.get_vendor_session(session_id)
+
+    def create_vendor_session(self, incident: Incident, vendor: Vendor) -> VendorSession:
+        existing = next(
+            (s for s in self.repository.list_vendor_sessions(vendor.telegram_chat_id or "")
+             if s.incident_id == incident.incident_id and s.vendor_id == vendor.vendor_id
+             and not s.cancelled),
+            None,
+        )
+        if existing:
+            return existing
+        now = self.clock.now()
+        session = VendorSession(
+            incident_id=incident.incident_id,
+            vendor_id=vendor.vendor_id,
+            telegram_chat_id=vendor.telegram_chat_id or "",
+            created_at=now,
+            updated_at=now,
+        )
+        self.repository.save_vendor_session(session)
+        return session
+
+    def _save_vendor_session(self, session: VendorSession) -> VendorSession:
+        session.revision += 1
+        session.updated_at = self.clock.now()
+        self.repository.save_vendor_session(session)
+        return session
+
+    def _session_context(self, session: VendorSession) -> tuple[Incident, Vendor]:
+        incident = self._get(session.incident_id)
+        vendor = next((v for v in self.vendors if v.vendor_id == session.vendor_id), None)
+        if not vendor or vendor.telegram_chat_id != session.telegram_chat_id:
+            raise ValueError("vendor session is not authorized")
+        return incident, vendor
+
+    @staticmethod
+    def _force_reply(placeholder: str) -> dict[str, Any]:
+        return {"force_reply": True, "input_field_placeholder": placeholder, "selective": True}
+
+    def accept_vendor_session(self, session: VendorSession) -> VendorSession:
+        incident, vendor = self._session_context(session)
+        if session.stage != "OFFERED" or incident.assigned_vendor_id != vendor.vendor_id:
+            raise ValueError("This offer is no longer current. Use /status for the current step.")
+        session.stage = "AWAITING_PRICE"
+        self._save_vendor_session(session)
+        self._notify_vendor(
+            incident, vendor,
+            "✅ Job reserved for you\n\nStep 1 of 2 — Quote\n\n"
+            "Reply to this message with the estimated total in SGD.\n\n"
+            "Examples:\n220\nS$220\nPRICE 220.50\n\nNothing is submitted yet.",
+            f"vendor-session-price:{session.session_id}",
+            self._force_reply("SGD amount, e.g. 220.00"),
+        )
+        return session
+
+    def vendor_price(self, session: VendorSession, amount: float) -> VendorSession:
+        incident, vendor = self._session_context(session)
+        if session.stage not in {"AWAITING_PRICE", "CONFIRMING_PRICE"}:
+            raise ValueError("Price is not the current step. Use /status for the current step.")
+        session.draft_price = round(amount, 2)
+        session.stage = "CONFIRMING_PRICE"
+        self._save_vendor_session(session)
+        self._notify_vendor(
+            incident, vendor,
+            f"Confirm quote\n\nEstimated total: S${session.draft_price:.2f}\n\nThis has not been submitted.",
+            f"vendor-session-price-review:{session.session_id}:{session.revision}",
+            {"inline_keyboard": [[
+                {"text": f"Confirm S${session.draft_price:.2f}", "callback_data": f"vs:{session.session_id}:pc"},
+                {"text": "Edit price", "callback_data": f"vs:{session.session_id}:pe"},
+            ], [{"text": "Cancel intake", "callback_data": f"vs:{session.session_id}:cx"}] ]},
+        )
+        return session
+
+    def confirm_vendor_price(self, session: VendorSession) -> VendorSession:
+        incident, vendor = self._session_context(session)
+        if session.stage != "CONFIRMING_PRICE" or session.draft_price is None:
+            raise ValueError("There is no price awaiting confirmation.")
+        session.price_confirmed = True
+        session.stage = "AWAITING_ETA"
+        self._save_vendor_session(session)
+        self._notify_vendor(
+            incident, vendor,
+            "Step 2 of 2 — Arrival ETA\n\nReply with the number of minutes until arrival.\n\n"
+            "Examples:\n20\nETA 20\n20 minutes\n\nNothing is submitted yet.",
+            f"vendor-session-eta:{session.session_id}", self._force_reply("Minutes until arrival, e.g. 20"),
+        )
+        return session
+
+    def vendor_eta(self, session: VendorSession, minutes: int) -> VendorSession:
+        incident, vendor = self._session_context(session)
+        if session.stage not in {"AWAITING_ETA", "CONFIRMING_ETA"} or not session.price_confirmed:
+            raise ValueError("ETA is not the current step. Use /status for the current step.")
+        session.draft_eta = minutes
+        session.stage = "CONFIRMING_ETA"
+        self._save_vendor_session(session)
+        self._notify_vendor(
+            incident, vendor,
+            f"Confirm arrival ETA\n\nArrival: {minutes} minutes\n\nThis has not been submitted.",
+            f"vendor-session-eta-review:{session.session_id}:{session.revision}",
+            {"inline_keyboard": [[
+                {"text": f"Confirm {minutes} minutes", "callback_data": f"vs:{session.session_id}:ec"},
+                {"text": "Edit ETA", "callback_data": f"vs:{session.session_id}:ee"},
+            ], [{"text": "Back to price", "callback_data": f"vs:{session.session_id}:eb"}] ]},
+        )
+        return session
+
+    def legacy_vendor_input(self, session: VendorSession, amount: float, minutes: int) -> VendorSession:
+        incident, vendor = self._session_context(session)
+        if session.stage not in {"AWAITING_PRICE", "AWAITING_ETA", "CONFIRMING_PRICE", "CONFIRMING_ETA"}:
+            raise ValueError("This combined response is not the current step. Use /status.")
+        session.draft_price = amount
+        session.draft_eta = minutes
+        session.price_confirmed = False
+        session.eta_confirmed = False
+        session.stage = "REVIEW"
+        self._save_vendor_session(session)
+        self._notify_vendor(
+            incident, vendor,
+            f"Review your response\n\nQuote: S${amount:.2f}\nArrival ETA: {minutes} minutes\nWork order: {incident.work_order_id}\n\nNothing has been submitted yet.\n\nThe legacy combined format was saved as a draft. Explicitly confirm the quote and ETA before submitting.",
+            f"vendor-legacy-review:{session.session_id}:{session.revision}",
+            {"inline_keyboard": [[{"text": "Edit price", "callback_data": f"vs:{session.session_id}:pe"}, {"text": "Edit ETA", "callback_data": f"vs:{session.session_id}:ee"}], [{"text": "Cancel intake", "callback_data": f"vs:{session.session_id}:cx"}]]},
+        )
+        return session
+
+    def confirm_vendor_eta(self, session: VendorSession) -> VendorSession:
+        incident, vendor = self._session_context(session)
+        if session.stage != "CONFIRMING_ETA" or session.draft_eta is None:
+            raise ValueError("There is no ETA awaiting confirmation.")
+        session.eta_confirmed = True
+        session.stage = "REVIEW"
+        self._save_vendor_session(session)
+        self._notify_vendor(
+            incident, vendor,
+            f"Review your response\n\nQuote: S${session.draft_price:.2f}\n"
+            f"Arrival ETA: {session.draft_eta} minutes\nWork order: {incident.work_order_id}\n"
+            f"Property: {incident.work_order.property_name if incident.work_order else 'reported unit'}\n\nNothing has been submitted yet.",
+            f"vendor-session-review:{session.session_id}:{session.revision}",
+            {"inline_keyboard": [[{"text": "Submit quote and ETA", "callback_data": f"vs:{session.session_id}:su"}],
+             [{"text": "Edit price", "callback_data": f"vs:{session.session_id}:pe"}, {"text": "Edit ETA", "callback_data": f"vs:{session.session_id}:ee"}],
+             [{"text": "Release job", "callback_data": f"vs:{session.session_id}:cx"}]]},
+        )
+        return session
+
+    def submit_vendor_quote(self, session: VendorSession, event_id: str) -> VendorSession:
+        incident, vendor = self._session_context(session)
+        if session.stage != "REVIEW" or not session.price_confirmed or not session.eta_confirmed:
+            raise ValueError("Complete and review both fields before submitting.")
+        assert session.draft_price is not None and session.draft_eta is not None
+        self.process_action(incident.incident_id, ActionRequest(
+            action="vendor_quote", event_id=f"{event_id}:quote",
+            payload={"vendor_id": vendor.vendor_id, "amount": session.draft_price},
+        ))
+        self.process_action(incident.incident_id, ActionRequest(
+            action="eta", event_id=f"{event_id}:eta",
+            payload={"vendor_id": vendor.vendor_id, "eta_minutes": session.draft_eta},
+        ))
+        session.final_price = session.draft_price
+        session.final_price_confirmed = True
+        session.submitted = True
+        session.stage = "SUBMITTED"
+        self._save_vendor_session(session)
+        current = self._get(incident.incident_id)
+        if current.approval and current.approval.status == "pending":
+            self._notify_vendor(
+                current, vendor,
+                f"⚠️ Manager approval required\n\nYour S${session.draft_price:.2f} quote exceeds the S$250 autonomous limit.\n\nDo not travel or begin work until approval is received.",
+                f"vendor-approval-pending:{session.session_id}",
+            )
+        else:
+            self._notify_vendor(
+                current, vendor,
+                f"✅ Quote and ETA submitted\n\nQuote: S${session.draft_price:.2f}\nArrival ETA: {session.draft_eta} minutes\n\nTravel to the property. When you arrive, tap Start job.",
+                f"vendor-submitted:{session.session_id}",
+                {"inline_keyboard": [[{"text": "Start job", "callback_data": f"vendor:{incident.incident_id}:start"}]]},
+            )
+        return session
+
+    def cancel_vendor_session(self, session: VendorSession) -> VendorSession:
+        if session.submitted and session.stage not in {"AWAITING_PHOTO", "AWAITING_SCOPE", "COMPLETION_REVIEW"}:
+            raise ValueError("An accepted job cannot be cancelled with /cancel.")
+        session.cancelled = True
+        session.stage = "CANCELLED"
+        self._save_vendor_session(session)
+        return session
+
+    def start_vendor_job(self, session: VendorSession, event_id: str) -> Incident:
+        incident, vendor = self._session_context(session)
+        if (session.stage != "SUBMITTED" or not session.submitted or not session.price_confirmed
+                or not session.eta_confirmed or incident.assigned_vendor_id != vendor.vendor_id
+                or incident.approval and incident.approval.status == "pending"):
+            self._timeline(incident, "work_started_blocked", "VENDOR_SESSION_PRECONDITIONS", event_id=event_id)
+            self._save(incident)
+            raise ValueError("Start job is not available yet. Use /status for the current state.")
+        current = self.process_action(incident.incident_id, ActionRequest(
+            action="work_started", event_id=event_id, payload={"vendor_id": vendor.vendor_id}
+        ))
+        session.stage = "SUBMITTED"
+        self._save_vendor_session(session)
+        return current
+
+    def prepare_completion(self, session: VendorSession) -> VendorSession:
+        incident, vendor = self._session_context(session)
+        if incident.status.value != "IN_PROGRESS" or not session.submitted:
+            raise ValueError("Completion is available after Start job.")
+        session.stage = "AWAITING_PHOTO"
+        self._save_vendor_session(session)
+        self._notify_vendor(
+            incident, vendor,
+            "🛠 Job started\n\nWhen the repair is finished:\n\n1. Reply with one clear after-photo showing the repaired area.\n2. Send a short description of the work performed.\n3. Review the final price and evidence.\n4. Tap Submit completion.\n\nRequired: one after-photo, work-performed summary, confirmed final price.\n\n📷 Completion step 1 of 2\n\nReply to this message with one clear after-photo showing the repaired area and surrounding surface.",
+            f"completion-photo-prompt:{session.session_id}", self._force_reply("Attach one clear after-photo"),
+        )
+        return session
+
+    def completion_photo(self, session: VendorSession, media: list[Any]) -> VendorSession:
+        incident, vendor = self._session_context(session)
+        photo = next((asset for asset in media if asset.mime_type.startswith("image/")), None)
+        if not photo:
+            self._notify_vendor(incident, vendor, "❌ Please attach one clear after-photo. Text, voice, and video alone cannot replace the required photo.", f"completion-photo-retry:{session.session_id}", self._force_reply("Attach one clear after-photo"))
+            return session
+        validate_media_asset(photo)
+        photo.storage_uri = self.media_store.put(photo)
+        if photo.asset_id not in incident.media_ids:
+            incident.media_ids.append(photo.asset_id)
+        self._save(incident)
+        session.completion_photo_ids = [photo.asset_id]
+        session.stage = "AWAITING_SCOPE"
+        self._save_vendor_session(session)
+        self.record_communication(communication_id=f"comm:vendor-session:{session.session_id}:photo:{session.revision}", incident_id=incident.incident_id, sender_role="vendor", sender_id=vendor.vendor_id, recipient_role="agent", recipient_id="no-more-buckets", channel="telegram", direction="inbound", message_type="image", text="Completion after-photo attached.", media_ids=[photo.asset_id], provider_message_id=photo.asset_id, delivery_status="received")
+        self._notify_vendor(incident, vendor, "📝 Completion step 2 of 2\n\nBriefly describe what you repaired and any part replaced.\n\nExample:\nReplaced the failed sink seal and tested the joint with the water running.", f"completion-scope-prompt:{session.session_id}", self._force_reply("Describe work performed (10–500 characters)"))
+        return session
+
+    def completion_scope(self, session: VendorSession, scope: str) -> VendorSession:
+        incident, vendor = self._session_context(session)
+        meaningful = " ".join(scope.split())
+        if session.stage != "AWAITING_SCOPE" or not 10 <= len(meaningful) <= 500:
+            self._notify_vendor(incident, vendor, "❌ Please describe the work performed in 10–500 meaningful characters.", f"completion-scope-retry:{session.session_id}", self._force_reply("Describe work performed (10–500 characters)"))
+            return session
+        session.completion_scope = meaningful
+        session.final_price = session.final_price or session.draft_price
+        session.final_price_confirmed = True
+        session.stage = "COMPLETION_REVIEW"
+        self._save_vendor_session(session)
+        self._notify_vendor(incident, vendor, f"Review completion\n\nAfter-photo: Attached\nWork performed: {meaningful}\nFinal price: S${session.final_price:.2f}\n\nNothing has been submitted yet.", f"completion-review:{session.session_id}:{session.revision}", {"inline_keyboard": [[{"text": "Submit completion", "callback_data": f"vs:{session.session_id}:cs"}], [{"text": "Replace photo", "callback_data": f"vs:{session.session_id}:cr"}, {"text": "Edit work summary", "callback_data": f"vs:{session.session_id}:ce"}], [{"text": "Change final price", "callback_data": f"vs:{session.session_id}:cf"}, {"text": "Cancel completion draft", "callback_data": f"vs:{session.session_id}:cx"}]]})
+        return session
+
+    def submit_completion(self, session: VendorSession, event_id: str) -> Incident:
+        incident, vendor = self._session_context(session)
+        if session.stage != "COMPLETION_REVIEW" or not session.completion_photo_ids or not session.completion_scope or not session.final_price_confirmed:
+            raise ValueError("Completion requires a photo, work summary, and confirmed final price.")
+        if incident.approval and incident.approval.status == "pending":
+            raise ValueError("Manager approval is required before completion can be submitted.")
+        photo = self.media_store.get(session.completion_photo_ids[0])
+        if not photo or session.final_price is None:
+            raise ValueError("Completion evidence is unavailable; please replace the photo.")
+        invoice = Invoice(invoice_id=f"invoice_{incident.incident_id}_{event_id}", vendor_id=vendor.vendor_id, currency="SGD", total=session.final_price, line_items=[InvoiceLineItem(description=f"repair work: {session.completion_scope}", quantity=1, unit_price=session.final_price)])
+        current = self.process_action(incident.incident_id, ActionRequest(action="completion", event_id=event_id, payload={"photo": photo.model_dump(), "invoice": invoice.model_dump()}))
+        session.submitted = True
+        session.stage = "SUBMITTED"
+        self._save_vendor_session(session)
+        return current
+
+    def change_final_price(self, session: VendorSession, amount: float) -> VendorSession:
+        incident, vendor = self._session_context(session)
+        if session.stage != "COMPLETION_REVIEW":
+            raise ValueError("Final price can only be changed from the completion review.")
+        session.final_price = round(amount, 2)
+        session.final_price_confirmed = False
+        session.stage = "CONFIRMING_FINAL_PRICE"
+        self._save_vendor_session(session)
+        self._notify_vendor(incident, vendor, f"Confirm final price\n\nFinal price: S${amount:.2f}\n\nThis has not been submitted.", f"completion-price-review:{session.session_id}:{session.revision}", {"inline_keyboard": [[{"text": f"Confirm S${amount:.2f}", "callback_data": f"vs:{session.session_id}:fp"}, {"text": "Edit final price", "callback_data": f"vs:{session.session_id}:cf"}]]})
+        return session
+
+    def confirm_final_price(self, session: VendorSession, event_id: str) -> VendorSession:
+        incident, vendor = self._session_context(session)
+        if session.stage != "CONFIRMING_FINAL_PRICE" or session.final_price is None:
+            raise ValueError("There is no final price awaiting confirmation.")
+        if incident.work_order and session.final_price > incident.work_order.authorized_amount:
+            self.process_action(incident.incident_id, ActionRequest(action="vendor_quote", event_id=f"{event_id}:approval", payload={"vendor_id": vendor.vendor_id, "amount": session.final_price}))
+        session.final_price_confirmed = True
+        session.stage = "COMPLETION_REVIEW"
+        self._save_vendor_session(session)
+        self._notify_vendor(incident, vendor, f"Review completion\n\nAfter-photo: Attached\nWork performed: {session.completion_scope}\nFinal price: S${session.final_price:.2f}\n\nNothing has been submitted yet.", f"completion-review-final-price:{session.session_id}:{session.revision}")
+        return session
 
     def process_action(self, incident_id: str, request: ActionRequest) -> Incident:
         # Validate nested untrusted input before it consumes the idempotency key.
@@ -1358,8 +1629,8 @@ class IncidentService:
             eta_minutes = request.payload.get("eta_minutes")
             if eta_minutes is not None:
                 minutes = int(eta_minutes)
-                if not 1 <= minutes <= 180:
-                    raise ValueError("ETA must be between 1 and 180 minutes")
+                if not 1 <= minutes <= 1440:
+                    raise ValueError("ETA must be between 1 and 1440 minutes")
                 incident.eta = self.clock.now() + timedelta(minutes=minutes)
             self._notify(
                 incident,
@@ -1376,7 +1647,6 @@ class IncidentService:
                     ),
                     None,
                 )
-                started = False
                 if incident.approval and incident.approval.status == "pending":
                     self._timeline(
                         incident,
@@ -1397,19 +1667,6 @@ class IncidentService:
                         IncidentStatus.IN_PROGRESS,
                         "VENDOR_CHECK_IN_RECEIVED",
                         request.event_id,
-                    )
-                    started = True
-                if vendor and started:
-                    self._notify_vendor(
-                        incident,
-                        vendor,
-                        (
-                            "✅ Work order accepted\n\n"
-                            "Tap Start job when you arrive.\n\n"
-                            "When complete, attach one after-photo with this caption:\n\n"
-                            "COMPLETE\nPRICE <amount>\nSCOPE <work performed>"
-                        ),
-                        "completion-request",
                     )
             else:
                 self._timeline(

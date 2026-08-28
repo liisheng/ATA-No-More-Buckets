@@ -7,6 +7,8 @@ from app.adapters import (
     NotificationMessage,
     TelegramBotAdapter,
     TelegramVendorAdapter,
+    parse_telegram_eta,
+    parse_telegram_price,
     parse_telegram_vendor_reply,
 )
 from app.config import Settings
@@ -55,6 +57,26 @@ def test_vendor_reply_parser_supports_buttons_followup_commands() -> None:
     assert parse_telegram_vendor_reply("DECLINE") == {"outcome": "decline"}
     assert parse_telegram_vendor_reply("ETA 30 minutes") == {"eta_minutes": 30}
     assert parse_telegram_vendor_reply("not a typed vendor reply") is None
+
+
+@pytest.mark.parametrize("value", ["220", "S$220", "SGD 220", "PRICE 220", "/price 220.50"])
+def test_vendor_price_parser_accepts_only_supported_sgd_forms(value: str) -> None:
+    assert parse_telegram_price(value) in {220.0, 220.5}
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "220.999", "USD 220", "220 230", "S$0"])
+def test_vendor_price_parser_rejects_invalid_values(value: str) -> None:
+    assert parse_telegram_price(value) is None
+
+
+@pytest.mark.parametrize("value", ["20", "ETA 20", "20 min", "20 minutes", "/eta 20"])
+def test_vendor_eta_parser_accepts_supported_forms(value: str) -> None:
+    assert parse_telegram_eta(value) == 20
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "12.5", "tomorrow", "10:30", "20 30", "ETA 20 30"])
+def test_vendor_eta_parser_rejects_invalid_values(value: str) -> None:
+    assert parse_telegram_eta(value) is None
 
 
 def test_telegram_vendor_dispatch_sends_accept_decline_keyboard(monkeypatch) -> None:

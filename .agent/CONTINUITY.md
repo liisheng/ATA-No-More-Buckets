@@ -2,6 +2,8 @@
 
 ## [PLANS]
 
+- 2026-08-28T21:10+08:00 [USER] Replace the vendor's loosely typed command flow with a precise guided Telegram workflow: staged price and ETA collection, validation and explicit confirmation before submission, recovery paths for invalid input, and clear post-acceptance/start/completion attachment instructions. Codex will provide the implementation brief; Luna will implement later.
+
 - 2026-08-26T20:30+08:00 [USER] Prioritize a reliable live happy path that automatically contacts a vendor; defer escalation as a secondary demo concern. Codex must inspect the existing flow and obtain user decisions before generating Luna's consolidated prompt.
 - 2026-08-26T20:24+08:00 [USER] Before sending the multimodal UX prompt to Luna, incorporate the live finding that a valid leak report can stall before vendor dispatch and leave the paired vendor group silent.
 - 2026-08-26T20:18+08:00 [USER] Prepare a Luna implementation brief to replace the misleading Telegram draft `Add more` behavior with explicit multimodal draft editing and live website previews for tenant text, image, video, and voice input; no code change is requested from this task.
@@ -14,6 +16,8 @@
 
 ## [DECISIONS]
 
+- 2026-08-28T21:10+08:00 [ASSUMPTION] Vendor intake should use persisted per-incident conversation state plus Telegram ForceReply prompts and slash-command fallbacks so it works in a privacy-enabled vendor group. Accepting within ten minutes stops the response SLA; Start job is withheld until confirmed quote and ETA are processed and no approval blocks work.
+
 - 2026-08-27T20:07:56+08:00 [USER] Preserve Vendor A's compressed 8/12-second demo fallback, but give the real Telegram Vendor B a 10-minute response window before pool-exhaustion escalation; Telegram messages must preserve intentional line and paragraph breaks.
 - 2026-08-26T20:34+08:00 [USER] Corrected iteration order: Codex must first give Luna the consolidated code-change prompt; only after Luna implements, Codex verifies/deploys, and then the user performs manual Telegram testing. Do not ask the user to retest a known-broken build.
 - 2026-08-26T20:25+08:00 [USER] Collaboration workflow: the user is the manual tester for real Telegram/web behavior; after each result, Codex diagnoses using live evidence and supplies Luna with precise coding instructions, acceptance criteria, and retest steps.
@@ -24,6 +28,7 @@
 - 2026-08-25T23:41+08:00 [ASSUMPTION] Cloud deployment will use the Gemini Developer API key path (`GOOGLE_GENAI_USE_VERTEXAI=false`), a user-managed Cloud Run runtime service account, and a public Cloud Run URL required by Telegram; `CLOUD_TASKS_INVOKER_SERVICE_ACCOUNT` remains blank for this synthetic public demo.
 - 2026-08-26T01:29+08:00 [CODE] Tenant Telegram reports now use persisted expiring drafts with text/photo/voice accumulation, inline Submit/Add more/Cancel controls, stable draft idempotency, and a submitted tombstone for repeated Submit taps.
 - 2026-08-26T01:29+08:00 [CODE] Vendor Telegram callbacks now cover Accept/Decline/Start job, typed price/ETA, bounded completion captions, deterministic evidence gating, and tenant Dry now/Still leaking warranty controls.
+- 2026-08-28T22:00+08:00 [CODE] Vendor Telegram intake now uses persisted VendorSession records with staged price/ETA confirmation, completion photo/summary review, ForceReply prompts, `/status`/`/help`/`/price`/`/eta`/`/cancel`, and non-submitting legacy combined-input compatibility.
 
 ## [PROGRESS]
 
@@ -98,6 +103,8 @@
 - 2026-08-25T23:41+08:00 [TOOL] Pub/Sub publishing is part of the cloud adapter, but end-to-end push delivery to `/api/events/pubsub` additionally requires a push subscription; workflow progression itself uses Cloud Tasks and does not depend on that subscription.
 
 ## [OUTCOMES]
+
+- 2026-08-28T22:00+08:00 [CODE] Implemented the requested guided vendor workflow in models, repositories, service, Telegram webhook/adapter, documentation, and regression tests. Backend pytest passes 85 tests, Ruff and mypy pass, frontend ESLint/Vitest/build pass, Vitest passed twice consecutively, and all three Playwright scenarios pass. Commit 8ef7510 was created locally; no deployment, push, pairing, secret, or model changes were made.
 
 - 2026-08-28T20:54+08:00 [TOOL] Live polling release is verified: backend 62 passed/1 skipped, Ruff, mypy, frontend lint, three consecutive 14-test Vitest runs, production build, and 3 Playwright scenarios pass. Production renders `inc_dc555525fdae` with tenant/vendor lanes and media instead of the private-drafts 404/waiting state; runtime uses Firestore, Telegram, and exact `gemini-3.5-flash`; Telegram has zero pending updates/no last error; Cloud Tasks is RUNNING; and revision `00014-bim` has no error logs.
 

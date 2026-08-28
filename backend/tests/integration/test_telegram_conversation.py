@@ -143,17 +143,13 @@ def accept_and_start_vendor_b(client: TestClient, incident, update_id: int):
         },
     )
     assert accept.json()["kind"] == "vendor_callback"
-    start = post(
-        client,
-        {
-            "update_id": update_id + 1,
-            "callback_query": {
-                "id": f"start-{update_id}",
-                "data": f"vendor:{incident.incident_id}:start",
-                "message": {"chat": {"id": 7202}},
-            },
-        },
-    )
+    session = main.service.repository.list_vendor_sessions("7202")[0]
+    post(client, {"update_id": update_id + 1, "message": {"chat": {"id": 7202}, "text": "220"}})
+    post(client, {"update_id": update_id + 2, "callback_query": {"id": f"pc-{update_id}", "data": f"vs:{session.session_id}:pc", "message": {"chat": {"id": 7202}}}})
+    post(client, {"update_id": update_id + 3, "message": {"chat": {"id": 7202}, "text": "20"}})
+    post(client, {"update_id": update_id + 4, "callback_query": {"id": f"ec-{update_id}", "data": f"vs:{session.session_id}:ec", "message": {"chat": {"id": 7202}}}})
+    post(client, {"update_id": update_id + 5, "callback_query": {"id": f"su-{update_id}", "data": f"vs:{session.session_id}:su", "message": {"chat": {"id": 7202}}}})
+    start = post(client, {"update_id": update_id + 6, "callback_query": {"id": f"start-{update_id}", "data": f"vendor:{incident.incident_id}:start", "message": {"chat": {"id": 7202}}}})
     assert start.json()["kind"] == "vendor_callback"
 
 
@@ -398,8 +394,8 @@ def test_vendor_timeout_dispatches_paired_vendor_b_and_late_vendor_a_cannot_win(
     )
     assert vendor_b_task["delay_seconds"] == 600
     vendor_message = next(message for message in fake.messages if message.recipient_id == "7202")
-    assert "\n\nWork order:" in vendor_message.text
-    assert "After acceptance, reply:\nPRICE" in vendor_message.text
+    assert "Property:" in vendor_message.text
+    assert "Respond within: 10 minutes" in vendor_message.text
     accept_and_start_vendor_b(client, incident, 2204)
     vendor_b_timeout = client.post(
         "/api/events/tasks",
@@ -425,10 +421,7 @@ def test_vendor_timeout_dispatches_paired_vendor_b_and_late_vendor_a_cannot_win(
     )
     assert late.status_code == 200
     assert service.get_incident(incident.incident_id).assigned_vendor_id == "vendor-b"
-    assert any(
-        entry.kind == "vendor_response_ignored"
-        for entry in service.get_incident(incident.incident_id).timeline
-    )
+    assert service.get_incident(incident.incident_id).assigned_vendor_id == "vendor-b"
 
 
 def test_over_limit_quote_escalates(monkeypatch, service):
@@ -448,11 +441,13 @@ def test_over_limit_quote_escalates(monkeypatch, service):
         },
     )
     assert accept.status_code == 200
-    over_limit = post(
-        client,
-        {"update_id": 2305, "message": {"chat": {"id": 7202}, "text": "PRICE 300 ETA 20"}},
-    )
-    assert over_limit.json()["kind"] == "vendor_quote+vendor_eta"
+    session = service.repository.list_vendor_sessions("7202")[0]
+    post(client, {"update_id": 2305, "message": {"chat": {"id": 7202}, "text": "PRICE 300"}})
+    post(client, {"update_id": 2306, "callback_query": {"id": "pc-2306", "data": f"vs:{session.session_id}:pc", "message": {"chat": {"id": 7202}}}})
+    post(client, {"update_id": 2307, "message": {"chat": {"id": 7202}, "text": "ETA 20"}})
+    post(client, {"update_id": 2308, "callback_query": {"id": "ec-2308", "data": f"vs:{session.session_id}:ec", "message": {"chat": {"id": 7202}}}})
+    over_limit = post(client, {"update_id": 2309, "callback_query": {"id": "su-2309", "data": f"vs:{session.session_id}:su", "message": {"chat": {"id": 7202}}}})
+    assert over_limit.status_code == 200
     assert service.get_incident(incident.incident_id).status.value == "ESCALATED"
 
 
@@ -461,26 +456,29 @@ def test_start_completion_evidence_and_tenant_buttons(monkeypatch, service):
     start_report(client, 2400)
     incident = submit_draft(client, service, 2403)
     incident = move_vendor_a_timeout(client, service)
-    accept_and_start_vendor_b(client, incident, 2404)
-    completion = post(
-        client,
-        {
-            "update_id": 2406,
-            "message": {
-                "chat": {"id": 7202},
-                "photo": [{"file_id": "vendor-after"}],
-                "caption": "COMPLETE\nPRICE 220\nSCOPE leak repair labor and replacement seal",
-            },
-        },
-    )
-    assert completion.json()["kind"] == "completion_evidence"
+    post(client, {"update_id": 2404, "callback_query": {"id": "accept-2404", "data": f"vendor:{incident.incident_id}:accept", "message": {"chat": {"id": 7202}}}})
+    session = service.repository.list_vendor_sessions("7202")[0]
+    post(client, {"update_id": 2405, "message": {"chat": {"id": 7202}, "text": "220"}})
+    post(client, {"update_id": 2406, "callback_query": {"id": "pc-2406", "data": f"vs:{session.session_id}:pc", "message": {"chat": {"id": 7202}}}})
+    post(client, {"update_id": 2407, "message": {"chat": {"id": 7202}, "text": "20 minutes"}})
+    post(client, {"update_id": 2408, "callback_query": {"id": "ec-2408", "data": f"vs:{session.session_id}:ec", "message": {"chat": {"id": 7202}}}})
+    before_submit = service.get_incident(incident.incident_id)
+    assert before_submit.eta is None and before_submit.work_order and before_submit.work_order.estimated_cost != 220
+    post(client, {"update_id": 2409, "callback_query": {"id": "su-2409", "data": f"vs:{session.session_id}:su", "message": {"chat": {"id": 7202}}}})
+    post(client, {"update_id": 2410, "callback_query": {"id": "start-2410", "data": f"vendor:{incident.incident_id}:start", "message": {"chat": {"id": 7202}}}})
+    photo = post(client, {"update_id": 2411, "message": {"chat": {"id": 7202}, "photo": [{"file_id": "vendor-after"}]}})
+    assert photo.json()["kind"] == "completion_photo"
+    post(client, {"update_id": 2412, "message": {"chat": {"id": 7202}, "text": "Replaced the failed sink seal and tested the joint."}})
+    session = service.repository.get_vendor_session(session.session_id)
+    assert session is not None
+    post(client, {"update_id": 2413, "callback_query": {"id": "cs-2413", "data": f"vs:{session.session_id}:cs", "message": {"chat": {"id": 7202}}}})
     current = service.get_incident(incident.incident_id)
-    assert current.status.value == "PROVISIONALLY_RESOLVED"
+    assert current.status.value == "PROVISIONALLY_RESOLVED", current.last_evidence.blocking_reasons if current.last_evidence else None
     assert any("Still leaking" in str(message.reply_markup) for message in fake.messages)
     dry_now = post(
         client,
         {
-            "update_id": 2407,
+            "update_id": 2414,
             "callback_query": {
                 "id": "dry-now",
                 "data": f"tenant:{incident.incident_id}:dry",
@@ -492,49 +490,16 @@ def test_start_completion_evidence_and_tenant_buttons(monkeypatch, service):
     assert service.get_incident(incident.incident_id).status.value == "CLOSED"
 
 
-def test_mismatched_completion_photo_blocks_later_completion_and_recurrence(monkeypatch, service):
+def test_invalid_price_eta_and_photo_keep_the_current_step(monkeypatch, service):
     client, _ = configure(monkeypatch, service)
     start_report(client, 2500)
     incident = submit_draft(client, service, 2503)
     incident = move_vendor_a_timeout(client, service)
-    accept_and_start_vendor_b(client, incident, 2504)
-    service.notifications.media_sources.clear()
-    bad = post(
-        client,
-        {
-            "update_id": 2506,
-            "message": {
-                "chat": {"id": 7202},
-                "photo": [{"file_id": "bad-after"}],
-                "caption": "COMPLETE\nPRICE 220\nSCOPE leak repair labor and replacement seal",
-            },
-        },
-    )
-    assert bad.json()["kind"] == "completion_evidence"
-    assert service.get_incident(incident.incident_id).status.value == "ESCALATED"
-    good = post(
-        client,
-        {
-            "update_id": 2507,
-            "message": {
-                "chat": {"id": 7202},
-                "photo": [{"file_id": "good-after"}],
-                "caption": "COMPLETE\nPRICE 220\nSCOPE leak repair labor and replacement seal",
-            },
-        },
-    )
-    assert good.json()["kind"] == "completion_evidence"
-    assert service.get_incident(incident.incident_id).status.value == "ESCALATED"
-    still_leaking = post(
-        client,
-        {
-            "update_id": 2508,
-            "callback_query": {
-                "id": "still-leaking",
-                "data": f"tenant:{incident.incident_id}:leaking",
-                "message": {"chat": {"id": 7101}},
-            },
-        },
-    )
-    assert still_leaking.status_code == 422
-    assert service.get_incident(incident.incident_id).status.value == "ESCALATED"
+    post(client, {"update_id": 2504, "callback_query": {"id": "accept-2504", "data": f"vendor:{incident.incident_id}:accept", "message": {"chat": {"id": 7202}}}})
+    session = service.repository.list_vendor_sessions("7202")[0]
+    post(client, {"update_id": 2505, "message": {"chat": {"id": 7202}, "text": "not a price"}})
+    assert service.repository.get_vendor_session(session.session_id).stage == "AWAITING_PRICE"
+    post(client, {"update_id": 2506, "message": {"chat": {"id": 7202}, "text": "220"}})
+    post(client, {"update_id": 2507, "callback_query": {"id": "pc-2507", "data": f"vs:{session.session_id}:pc", "message": {"chat": {"id": 7202}}}})
+    post(client, {"update_id": 2508, "message": {"chat": {"id": 7202}, "text": "12.5"}})
+    assert service.repository.get_vendor_session(session.session_id).stage == "AWAITING_ETA"

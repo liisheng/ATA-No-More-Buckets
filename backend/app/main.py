@@ -38,8 +38,9 @@ from .adapters import (
     VertexGeminiFactExtractor,
     build_demo_media,
     build_demo_voice_media,
-    parse_telegram_completion,
-    parse_telegram_vendor_reply,
+    parse_telegram_eta,
+    parse_telegram_legacy_vendor_input,
+    parse_telegram_price,
 )
 from .catalog import demo_properties, demo_tenants, demo_vendors
 from .cloud_adapters import (
@@ -53,8 +54,6 @@ from .models import (
     ActionRequest,
     CommunicationRecord,
     Incident,
-    Invoice,
-    InvoiceLineItem,
     MediaAsset,
     MediaDescriptor,
     PairingCodeRequest,
@@ -64,6 +63,7 @@ from .models import (
     TelegramDraft,
     TenantContact,
     Vendor,
+    VendorSession,
 )
 from .repositories import FirestoreIncidentRepository, InMemoryIncidentRepository
 from .service import IncidentNotFound, IncidentService
@@ -199,6 +199,36 @@ def _tenant_for_chat(chat_id: str) -> TenantContact | None:
 
 def _vendor_for_chat(chat_id: str) -> Vendor | None:
     return next((vendor for vendor in service.vendors if vendor.telegram_chat_id == chat_id), None)
+
+
+def _vendor_session_for_chat(chat_id: str, session_id: str | None = None) -> VendorSession | None:
+    sessions = [s for s in service.repository.list_vendor_sessions(chat_id) if not s.cancelled]
+    if session_id:
+        return next((s for s in sessions if s.session_id == session_id), None)
+    active = [s for s in sessions if s.stage not in {"SUBMITTED", "CANCELLED"}]
+    if len(active) == 1:
+        return active[0]
+    return sessions[0] if len(sessions) == 1 else None
+
+
+def _vendor_help(session: VendorSession | None) -> str:
+    if not session:
+        return "No single active vendor intake is available. Use /status after opening the current work-order message."
+    next_action = {
+        "OFFERED": "Tap Accept job or Decline job.",
+        "AWAITING_PRICE": "Send one SGD amount, for example 220 or PRICE 220.50.",
+        "CONFIRMING_PRICE": "Tap the quote confirmation or Edit price.",
+        "AWAITING_ETA": "Send whole minutes, for example 20 or ETA 20.",
+        "CONFIRMING_ETA": "Tap the ETA confirmation, Edit ETA, or Back to price.",
+        "REVIEW": "Review the quote and ETA, then tap Submit quote and ETA.",
+        "SUBMITTED": "Tap Start job when you arrive, then Prepare completion when finished.",
+        "AWAITING_PHOTO": "Attach one clear after-photo.",
+        "AWAITING_SCOPE": "Send a 10–500 character work summary.",
+        "COMPLETION_REVIEW": "Review the completion and tap Submit completion.",
+    }.get(session.stage, "Use /status for the current step.")
+    values = f"Quote: S${session.draft_price:.2f}" if session.draft_price is not None else "Quote: not captured"
+    values += f"\nArrival ETA: {session.draft_eta} minutes" if session.draft_eta is not None else "\nArrival ETA: not captured"
+    return f"Current step: {session.stage}\n{values}\nNext: {next_action}"
 
 
 def _active_vendor_incident(vendor_id: str) -> Incident | None:
@@ -774,6 +804,72 @@ def telegram_webhook(
                 "kind": "tenant_confirmation" if parts[2] == "dry" else "warranty_recurrence",
             }
 
+        if len(parts) == 3 and parts[0] == "vs":
+            vendor = _vendor_for_chat(chat_id)
+            session = _vendor_session_for_chat(chat_id, parts[1]) if vendor else None
+            if not vendor or not session or session.vendor_id != vendor.vendor_id:
+                _answer_callback(callback.get("id"), "This vendor session is no longer current.", True)
+                return {"status": "processed", "kind": "stale_vendor_callback"}
+            service.record_communication(
+                communication_id=f"comm:vendor-session:{session.session_id}:button:{parts[2]}:{session.revision}",
+                incident_id=session.incident_id,
+                sender_role="vendor",
+                sender_id=vendor.vendor_id,
+                recipient_role="agent",
+                recipient_id="no-more-buckets",
+                channel="telegram",
+                direction="inbound",
+                message_type="button",
+                text=parts[2],
+                provider_message_id=provider_message_id,
+                delivery_status="received",
+            )
+            try:
+                if parts[2] == "pc":
+                    service.confirm_vendor_price(session)
+                elif parts[2] == "ec":
+                    service.confirm_vendor_eta(session)
+                elif parts[2] == "pe":
+                    session.stage = "AWAITING_PRICE"
+                    service._save_vendor_session(session)
+                    service._notify_vendor(service.get_incident(session.incident_id), vendor, "Edit price. Send one SGD amount, for example 220 or PRICE 220.50.", f"vendor-edit-price:{session.session_id}", service._force_reply("SGD amount, e.g. 220.00"))
+                elif parts[2] == "ee":
+                    session.stage = "AWAITING_ETA"
+                    service._save_vendor_session(session)
+                    service._notify_vendor(service.get_incident(session.incident_id), vendor, "Edit ETA. Send whole minutes, for example 20 or ETA 20.", f"vendor-edit-eta:{session.session_id}", service._force_reply("Minutes until arrival, e.g. 20"))
+                elif parts[2] == "eb":
+                    session.stage = "AWAITING_PRICE"
+                    session.price_confirmed = False
+                    service._save_vendor_session(session)
+                    service._notify_vendor(service.get_incident(session.incident_id), vendor, "Back to price. Send one SGD amount.", f"vendor-back-price:{session.session_id}", service._force_reply("SGD amount, e.g. 220.00"))
+                elif parts[2] == "su":
+                    service.submit_vendor_quote(session, f"telegram-action-{update_id}")
+                elif parts[2] == "cx":
+                    service.cancel_vendor_session(session)
+                    service._notify_vendor(service.get_incident(session.incident_id), vendor, "Draft cancelled. The accepted job was not changed.", f"vendor-session-cancelled:{session.session_id}")
+                elif parts[2] == "cr":
+                    session.stage = "AWAITING_PHOTO"
+                    service._save_vendor_session(session)
+                    service._notify_vendor(service.get_incident(session.incident_id), vendor, "Reply with one clear after-photo.", f"completion-photo-replace:{session.session_id}", service._force_reply("Attach one clear after-photo"))
+                elif parts[2] == "ce":
+                    session.stage = "AWAITING_SCOPE"
+                    service._save_vendor_session(session)
+                    service._notify_vendor(service.get_incident(session.incident_id), vendor, "Edit the work summary in 10–500 meaningful characters.", f"completion-scope-edit:{session.session_id}", service._force_reply("Describe work performed"))
+                elif parts[2] == "cf":
+                    session.stage = "COMPLETION_REVIEW"
+                    service._save_vendor_session(session)
+                    service._notify_vendor(service.get_incident(session.incident_id), vendor, "Changing the final price requires a new confirmed SGD amount. Send it now.", f"completion-price-edit:{session.session_id}", service._force_reply("Final SGD price, e.g. 220.00"))
+                elif parts[2] == "fp":
+                    service.confirm_final_price(session, f"telegram-action-{update_id}")
+                elif parts[2] == "cs":
+                    service.submit_completion(session, f"telegram-action-{update_id}")
+                else:
+                    raise ValueError("unknown vendor session action")
+            except (ValueError, KeyError):
+                _answer_callback(callback.get("id"), _vendor_help(session), True)
+            _answer_callback(callback.get("id"))
+            return {"status": "processed", "kind": "vendor_session_callback"}
+
         vendor = _vendor_for_chat(chat_id)
         if (
             not vendor
@@ -811,18 +907,21 @@ def telegram_webhook(
             provider_message_id=provider_message_id,
             delivery_status="received",
         )
-        service.process_action(
-            parts[1],
-            ActionRequest(
-                action=action,
-                event_id=f"telegram-action-{update_id}",
-                payload=(
-                    {"vendor_id": vendor.vendor_id, "outcome": parts[2]}
-                    if action == "vendor_response"
-                    else {"vendor_id": vendor.vendor_id}
+        if parts[2] != "start":
+            service.process_action(
+                parts[1],
+                ActionRequest(
+                    action=action,
+                    event_id=f"telegram-action-{update_id}",
+                    payload={"vendor_id": vendor.vendor_id, "outcome": parts[2]},
                 ),
-            ),
-        )
+            )
+        session = _vendor_session_for_chat(chat_id)
+        if parts[2] == "accept" and session and session.incident_id == parts[1] and session.stage == "OFFERED":
+            service.accept_vendor_session(session)
+        elif parts[2] == "start" and session and session.incident_id == parts[1]:
+            service.start_vendor_job(session, f"telegram-action-{update_id}")
+            service.prepare_completion(session)
         if hasattr(service.notifications, "answer_callback") and isinstance(
             callback.get("id"), str
         ):
@@ -1078,9 +1177,13 @@ def telegram_webhook(
     if vendor:
         vendor_incident = _active_vendor_incident(vendor.vendor_id)
         if not vendor_incident:
-            return {"status": "ignored", "kind": "no_active_vendor_work"}
+            service.notifications.send(NotificationMessage("vendor", chat_id, "There is no active vendor work. Use /help for instructions.", f"vendor-no-active:{chat_id}"))
+            return {"status": "processed", "kind": "no_active_vendor_work"}
+        session = _vendor_session_for_chat(chat_id)
+        if not session:
+            service.notifications.send(NotificationMessage(vendor_incident.incident_id, chat_id, "I can’t identify one active vendor session. Use /status from the current work-order message.", f"vendor-session-ambiguous:{chat_id}"))
+            return {"status": "processed", "kind": "vendor_session_required"}
         media = _telegram_media(message, "vendor")
-        completion = parse_telegram_completion(text)
         service.record_communication(
             communication_id=f"comm:telegram:{update_id}:vendor-message",
             incident_id=vendor_incident.incident_id,
@@ -1102,89 +1205,46 @@ def telegram_webhook(
             provider_message_id=provider_message_id,
             delivery_status="received",
         )
-        if completion:
-            photo = next((asset for asset in media if asset.mime_type.startswith("image/")), None)
-            if not photo:
-                service._notify_vendor(
-                    vendor_incident,
-                    vendor,
-                    "Completion details received. Please attach the after-photo with the same COMPLETE / PRICE / SCOPE caption.",
-                    "completion-photo-required",
-                )
-                return {"status": "processed", "kind": "completion_photo_required"}
-            invoice = Invoice(
-                invoice_id=f"invoice_{vendor_incident.incident_id}_{update_id}",
-                vendor_id=vendor.vendor_id,
-                currency=vendor_incident.work_order.currency
-                if vendor_incident.work_order
-                else service.settings.currency,
-                total=completion["amount"],
-                line_items=[
-                    InvoiceLineItem(
-                        description=completion["scope"], quantity=1, unit_price=completion["amount"]
-                    )
-                ],
-            )
-            service.process_action(
-                vendor_incident.incident_id,
-                ActionRequest(
-                    action="completion",
-                    event_id=f"telegram-action-{update_id}",
-                    payload={"photo": photo.model_dump(), "invoice": invoice.model_dump()},
-                ),
-            )
-            return {"status": "processed", "kind": "completion_evidence"}
-        if text.upper().startswith("COMPLETE"):
-            service._notify_vendor(
-                vendor_incident,
-                vendor,
-                "Use the exact three-line caption COMPLETE / PRICE <amount> / SCOPE <work performed> and attach an after-photo.",
-                "completion-format-required",
-            )
-            return {"status": "processed", "kind": "completion_format_required"}
-        reply = parse_telegram_vendor_reply(text)
-        if not reply:
-            return {"status": "ignored", "kind": "unrecognized_vendor_text"}
-        action_event_id = f"telegram-action-{update_id}"
-        if reply.get("outcome") in {"accept", "decline"}:
-            service.process_action(
-                vendor_incident.incident_id,
-                ActionRequest(
-                    action="vendor_response",
-                    event_id=action_event_id,
-                    payload={"vendor_id": vendor.vendor_id, "outcome": reply["outcome"]},
-                ),
-            )
-            action_event_id = f"telegram-action-{update_id}-quote"
-        if "amount" in reply:
-            service.process_action(
-                vendor_incident.incident_id,
-                ActionRequest(
-                    action="vendor_quote",
-                    event_id=action_event_id,
-                    payload={"vendor_id": vendor.vendor_id, "amount": reply["amount"]},
-                ),
-            )
-            if "eta_minutes" in reply:
-                service.process_action(
-                    vendor_incident.incident_id,
-                    ActionRequest(
-                        action="eta",
-                        event_id=f"telegram-action-{update_id}-eta",
-                        payload={
-                            "vendor_id": vendor.vendor_id,
-                            "eta_minutes": reply["eta_minutes"],
-                        },
-                    ),
-                )
-        kinds = []
-        if reply.get("outcome"):
-            kinds.append(f"vendor_{reply['outcome']}")
-        if "amount" in reply:
-            kinds.append("vendor_quote")
-        if "eta_minutes" in reply:
-            kinds.append("vendor_eta")
-        return {"status": "processed", "kind": "+".join(kinds)}
+        if command in {"/help", "/status"}:
+            service._notify_vendor(vendor_incident, vendor, _vendor_help(session), f"vendor-{command[1:]}:{session.session_id}")
+            return {"status": "processed", "kind": f"vendor_{command[1:]}"}
+        if command == "/cancel":
+            service.cancel_vendor_session(session)
+            service._notify_vendor(vendor_incident, vendor, "Draft cancelled. The accepted job and incident were not changed.", f"vendor-cancel:{session.session_id}")
+            return {"status": "processed", "kind": "vendor_cancelled"}
+        if session.stage == "AWAITING_PHOTO" and media:
+            service.completion_photo(session, media)
+            return {"status": "processed", "kind": "completion_photo"}
+        if session.stage == "AWAITING_SCOPE":
+            service.completion_scope(session, text)
+            return {"status": "processed", "kind": "completion_scope"}
+        if session.stage == "CONFIRMING_FINAL_PRICE":
+            amount = parse_telegram_price(text)
+            if amount is None:
+                service._notify_vendor(vendor_incident, vendor, "❌ I couldn’t use that final price. Send one SGD amount with at most two decimal places.", f"completion-price-invalid:{session.session_id}:{session.revision}", service._force_reply("Final SGD price, e.g. 220.00"))
+            else:
+                service.change_final_price(session, amount)
+            return {"status": "processed", "kind": "completion_final_price"}
+        if session.stage in {"AWAITING_PRICE", "CONFIRMING_PRICE"}:
+            legacy = parse_telegram_legacy_vendor_input(text)
+            if legacy:
+                service.legacy_vendor_input(session, legacy[0], legacy[1])
+                return {"status": "processed", "kind": "vendor_legacy_draft"}
+            amount = parse_telegram_price(text)
+            if amount is None:
+                service._notify_vendor(vendor_incident, vendor, "❌ I couldn’t use that price.\n\nSend one SGD amount, for example:\n220\nPRICE 220.50\n\nThe S$250 autonomous limit still applies.", f"vendor-price-invalid:{session.session_id}:{session.revision}", service._force_reply("SGD amount, e.g. 220.00"))
+            else:
+                service.vendor_price(session, amount)
+            return {"status": "processed", "kind": "vendor_price"}
+        if session.stage in {"AWAITING_ETA", "CONFIRMING_ETA"}:
+            minutes = parse_telegram_eta(text)
+            if minutes is None:
+                service._notify_vendor(vendor_incident, vendor, "❌ I couldn’t use that arrival ETA.\n\nSend a whole number from 1 to 1440 minutes, for example:\n20\nETA 20\n20 minutes", f"vendor-eta-invalid:{session.session_id}:{session.revision}", service._force_reply("Minutes until arrival, e.g. 20"))
+            else:
+                service.vendor_eta(session, minutes)
+            return {"status": "processed", "kind": "vendor_eta"}
+        service._notify_vendor(vendor_incident, vendor, _vendor_help(session), f"vendor-step-help:{session.session_id}:{session.revision}")
+        return {"status": "processed", "kind": "vendor_step_help"}
     raise HTTPException(
         status_code=403, detail="Telegram chat is not seeded for this synthetic demo"
     )

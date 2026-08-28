@@ -8,6 +8,7 @@ import re
 import wave
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from typing import Any, Protocol, cast
 from uuid import uuid4
 
@@ -323,6 +324,46 @@ def parse_telegram_vendor_reply(text: str) -> dict[str, Any] | None:
     return result or None
 
 
+def parse_telegram_price(text: str) -> float | None:
+    """Parse exactly one SGD amount for the vendor wizard."""
+    value = text.strip()
+    match = re.fullmatch(r"(?:(?:S\$|SGD)\s*)?(\d+(?:\.\d{1,2})?)", value, re.IGNORECASE)
+    if not match:
+        match = re.fullmatch(r"(?:PRICE|/PRICE)\s+(?:(?:S\$|SGD)\s*)?(\d+(?:\.\d{1,2})?)", value, re.IGNORECASE)
+    if not match:
+        return None
+    try:
+        amount = Decimal(match.group(1))
+    except InvalidOperation:
+        return None
+    if not Decimal("1.00") <= amount <= Decimal("100000.00"):
+        return None
+    return float(amount.quantize(Decimal("0.01")))
+
+
+def parse_telegram_eta(text: str) -> int | None:
+    """Parse exactly one whole-minute arrival ETA."""
+    value = text.strip()
+    match = re.fullmatch(r"(?:ETA|/ETA)?\s*(\d+)\s*(?:MIN|MINS|MINUTE|MINUTES)?", value, re.IGNORECASE)
+    if not match:
+        return None
+    minutes = int(match.group(1))
+    return minutes if 1 <= minutes <= 1440 else None
+
+
+def parse_telegram_legacy_vendor_input(text: str) -> tuple[float, int] | None:
+    """Recognize the old combined form only as a draft, never as an action."""
+    match = re.fullmatch(
+        r"PRICE\s+(?:(?:S\$|SGD)\s*)?(\d+(?:\.\d{1,2})?)\s+ETA\s+(\d+)\s*(?:MIN|MINS|MINUTE|MINUTES)?",
+        text.strip(), re.IGNORECASE,
+    )
+    if not match:
+        return None
+    price = parse_telegram_price(f"PRICE {match.group(1)}")
+    eta = parse_telegram_eta(match.group(2))
+    return (price, eta) if price is not None and eta is not None else None
+
+
 def parse_telegram_completion(text: str) -> dict[str, Any] | None:
     """Parse the bounded completion caption; scope and price stay vendor-supplied data."""
 
@@ -591,13 +632,14 @@ class TelegramVendorAdapter:
                 vendor.telegram_chat_id,
                 (
                     "🔧 New bounded work order\n\n"
-                    f"Work order: {work_order.work_order_id}\n"
-                    f"Property/unit: {work_order.property_name or 'the reported unit'}\n"
+                    f"Property: {work_order.property_name or 'the reported unit'}\n"
+                    f"Problem: {work_order.scope}\n"
                     f"Scope: {work_order.scope}\n"
-                    f"Authority: {work_order.currency} {work_order.authorized_amount:.2f}\n\n"
-                    "Tap Accept or Decline.\n\n"
-                    "After acceptance, reply:\n"
-                    "PRICE <amount> ETA <minutes>"
+                    f"Authority: up to S${work_order.authorized_amount:.0f}\n"
+                    "Respond within: 10 minutes\n\n"
+                    "1. Tap Accept or Decline.\n"
+                    "2. If accepted, I’ll collect and confirm your quote and ETA.\n"
+                    "3. Do not travel or begin work until the Start job button appears."
                 ),
                 idempotency_key,
                 reply_markup=keyboard,
@@ -609,13 +651,14 @@ class TelegramVendorAdapter:
             recipient_id=vendor.telegram_chat_id,
             text=(
                 "🔧 New bounded work order\n\n"
-                f"Work order: {work_order.work_order_id}\n"
-                f"Property/unit: {work_order.property_name or 'the reported unit'}\n"
+                f"Property: {work_order.property_name or 'the reported unit'}\n"
+                f"Problem: {work_order.scope}\n"
                 f"Scope: {work_order.scope}\n"
-                f"Authority: {work_order.currency} {work_order.authorized_amount:.2f}\n\n"
-                "Tap Accept or Decline.\n\n"
-                "After acceptance, reply:\n"
-                "PRICE <amount> ETA <minutes>"
+                f"Authority: up to S${work_order.authorized_amount:.0f}\n"
+                "Respond within: 10 minutes\n\n"
+                "1. Tap Accept or Decline.\n"
+                "2. If accepted, I’ll collect and confirm your quote and ETA.\n"
+                "3. Do not travel or begin work until the Start job button appears."
             ),
             message_type="button",
         )

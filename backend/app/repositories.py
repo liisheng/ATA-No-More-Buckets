@@ -13,6 +13,7 @@ from .models import (
     TelegramDraft,
     TenantContact,
     Vendor,
+    VendorSession,
 )
 
 
@@ -40,6 +41,12 @@ class IncidentRepository(Protocol):
     def delete_draft(self, draft_id: str) -> None: ...
 
     def delete_communication(self, communication_id: str) -> None: ...
+
+    def save_vendor_session(self, session: VendorSession) -> None: ...
+
+    def get_vendor_session(self, session_id: str) -> VendorSession | None: ...
+
+    def list_vendor_sessions(self, telegram_chat_id: str) -> builtins.list[VendorSession]: ...
 
     def move_communications(self, source_incident_id: str, target_incident_id: str) -> None: ...
 
@@ -85,6 +92,7 @@ class InMemoryIncidentRepository:
         self._pairing_codes: dict[str, PairingCodeRecord] = {}
         self._communications: dict[str, CommunicationRecord] = {}
         self._drafts: dict[str, TelegramDraft] = {}
+        self._vendor_sessions: dict[str, VendorSession] = {}
         self._properties: dict[str, PropertyConfig] = {}
         self._vendors: builtins.list[Vendor] = []
         self._tenants: dict[str, TenantContact] = {}
@@ -143,6 +151,20 @@ class InMemoryIncidentRepository:
 
     def delete_communication(self, communication_id: str) -> None:
         self._communications.pop(communication_id, None)
+
+    def save_vendor_session(self, session: VendorSession) -> None:
+        self._vendor_sessions[session.session_id] = deepcopy(session)
+
+    def get_vendor_session(self, session_id: str) -> VendorSession | None:
+        session = self._vendor_sessions.get(session_id)
+        return deepcopy(session) if session else None
+
+    def list_vendor_sessions(self, telegram_chat_id: str) -> builtins.list[VendorSession]:
+        return sorted(
+            [deepcopy(s) for s in self._vendor_sessions.values() if s.telegram_chat_id == telegram_chat_id],
+            key=lambda s: s.updated_at,
+            reverse=True,
+        )
 
     def move_communications(self, source_incident_id: str, target_incident_id: str) -> None:
         for record in self._communications.values():
@@ -236,6 +258,7 @@ class FirestoreIncidentRepository:
         self.events = self.client.collection("processed_events")
         self.communications = self.client.collection("communications")
         self.drafts = self.client.collection("telegram_drafts")
+        self.vendor_sessions = self.client.collection("vendor_sessions")
         self.reference_data = self.client.collection("reference_data")
 
     def save(self, incident: Incident) -> None:
@@ -298,6 +321,23 @@ class FirestoreIncidentRepository:
 
     def delete_communication(self, communication_id: str) -> None:
         self.communications.document(communication_id).delete()
+
+    def save_vendor_session(self, session: VendorSession) -> None:
+        self.vendor_sessions.document(session.session_id).set(session.model_dump(mode="json"))
+
+    def get_vendor_session(self, session_id: str) -> VendorSession | None:
+        snapshot = self.vendor_sessions.document(session_id).get()
+        if not snapshot.exists:
+            return None
+        return VendorSession.model_validate(snapshot.to_dict())
+
+    def list_vendor_sessions(self, telegram_chat_id: str) -> builtins.list[VendorSession]:
+        sessions = []
+        for snapshot in self.vendor_sessions.stream():
+            value = snapshot.to_dict() or {}
+            if value.get("telegram_chat_id") == telegram_chat_id:
+                sessions.append(VendorSession.model_validate(value))
+        return sorted(sessions, key=lambda s: s.updated_at, reverse=True)
 
     def move_communications(self, source_incident_id: str, target_incident_id: str) -> None:
         for snapshot in self.communications.stream():
