@@ -59,3 +59,57 @@ it("focuses the newest active incident when timestamps differ", async () => {
   expect(screen.getByText("Newest report")).toBeInTheDocument();
   expect(screen.queryByText("Older report")).not.toBeInTheDocument();
 });
+
+it("keeps vendor countdowns and outcomes attached to the matching vendor attempt", async () => {
+  const pendingIncident = {
+    incident_id: "inc-vendor-countdown",
+    property_id: "unit-1",
+    tenant_id: "tenant-1",
+    status: "DISPATCHING" as const,
+    report_text: "Water is dripping under the sink",
+    media_ids: [],
+    vendor_attempts: [
+      { vendor_id: "vendor-a", outcome: "timed_out", attempt_id: "attempt-a", event_id: "event-a", at: "2026-08-28T10:00:00Z" },
+      { vendor_id: "vendor-b", outcome: "pending", attempt_id: "attempt-b", event_id: "event-b", at: "2099-01-01T00:00:00Z", deadline_at: "2099-01-01T00:10:00Z" },
+    ],
+    created_at: "2026-08-28T10:00:00Z",
+    updated_at: "2026-08-28T10:00:12Z",
+    timeline: [
+      { event_id: "timeout-a", at: "2026-08-28T10:00:08Z", kind: "vendor_timeout_scheduled", metadata: { vendor_id: "vendor-a", timeout_seconds: 8, deadline_at: "2026-08-28T10:00:08Z" } },
+      { event_id: "timeout-b-old", at: "2099-01-01T00:00:01Z", kind: "vendor_timeout_scheduled", metadata: { vendor_id: "vendor-b", timeout_seconds: 30, deadline_at: "2099-01-01T00:00:30Z" } },
+      { event_id: "timeout-b-new", at: "2099-01-01T00:00:02Z", kind: "vendor_timeout_scheduled", metadata: { vendor_id: "vendor-b", timeout_seconds: 30, deadline_at: "2099-01-01T00:00:30Z" } },
+    ],
+  };
+  let currentIncident = pendingIncident;
+  vi.stubGlobal("fetch", vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
+    const path = String(input);
+    if (path.endsWith("/api/runtime")) return { ok: true, json: async () => ({ environment: "demo", deployment: "local_container", facts_provider: "deterministic", facts_model: "gemini-3.5-flash", storage_backend: "memory", eventing: "local", messaging_provider: "local_demo", demo_clock_enabled: true, demo_timings_seconds: {}, synthetic_data_only: true }) };
+    if (path.endsWith("/api/incidents")) return { ok: true, json: async () => [currentIncident] };
+    if (path.endsWith("/api/drafts")) return { ok: true, json: async () => [] };
+    if (path.endsWith("/api/incidents/inc-vendor-countdown")) return { ok: true, json: async () => currentIncident };
+    if (path.includes("/api/incidents/inc-vendor-countdown/")) return { ok: true, json: async () => [] };
+    return { ok: true, json: async () => [] };
+  }));
+
+  render(<App />);
+  await screen.findByText("Vendor A timed out / failed");
+  expect(screen.getByText(/Vendor B waiting for response · (?:10:00|09:5\d) remaining/)).toBeInTheDocument();
+  expect(screen.queryByText(/Vendor A timeout in 0s/)).not.toBeInTheDocument();
+  await screen.findByText(/Vendor B waiting for response · 09:5\d remaining/, {}, { timeout: 2500 });
+
+  currentIncident = {
+    ...pendingIncident,
+    vendor_attempts: pendingIncident.vendor_attempts.map((attempt) => attempt.vendor_id === "vendor-b" ? { ...attempt, attempt_id: "attempt-b-fallback", deadline_at: undefined } : attempt),
+    updated_at: "2026-08-28T10:00:15Z",
+  };
+  await screen.findByText(/Vendor B waiting for response · 00:30 remaining/);
+
+  currentIncident = {
+    ...pendingIncident,
+    status: "SCHEDULED",
+    vendor_attempts: pendingIncident.vendor_attempts.map((attempt) => attempt.vendor_id === "vendor-b" ? { ...attempt, outcome: "accepted" } : attempt),
+    updated_at: "2026-08-28T10:00:14Z",
+    timeline: [...pendingIncident.timeline, { event_id: "accepted-b", at: "2026-08-28T10:00:14Z", kind: "vendor_dispatch_outcome", metadata: { vendor_id: "vendor-b", outcome: "accept" } }],
+  };
+  await screen.findByText("Vendor B accepted", {}, { timeout: 2500 });
+});

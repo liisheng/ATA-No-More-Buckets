@@ -110,6 +110,7 @@ function App() {
   const [replayRunning, setReplayRunning] = useState(false);
   const [error, setError] = useState("");
   const [timeoutCountdown, setTimeoutCountdown] = useState<number | null>(null);
+  const timeoutCountdownAnchor = useRef<{ key: string; startedAt: number } | null>(null);
   const selectedIncidentId = useRef<string | null>(null);
   const replayGeneration = useRef(0);
   const replayRunningRef = useRef(false);
@@ -153,26 +154,48 @@ function App() {
   const vendorCommunications = communications.filter((item) => item.sender_role === "vendor" || item.recipient_role === "vendor");
   const agentCommunications = communications.filter((item) => item.sender_role === "scheduler" || item.sender_role === "system");
   const reportAudio = tenantCommunications.flatMap((item) => item.media_ids.map((id) => mediaById.get(id))).find((item) => item?.mime_type.startsWith("audio/"));
+  const latestAttemptForVendor = (vendorId: string) => incident?.vendor_attempts.reduce<typeof incident.vendor_attempts[number] | undefined>((latest, attempt) => {
+    if (attempt.vendor_id !== vendorId) return latest;
+    if (!latest || new Date(attempt.at).getTime() >= new Date(latest.at).getTime()) return attempt;
+    return latest;
+  }, undefined);
+  const vendorAAttempt = latestAttemptForVendor("vendor-a");
+  const vendorBAttempt = latestAttemptForVendor("vendor-b");
   const pendingAttempt = incident?.vendor_attempts.find((attempt) => attempt.outcome === "pending");
-  const timeoutSchedule = incident?.timeline.find((entry) => entry.kind === "vendor_timeout_scheduled");
+  const timeoutSchedule = pendingAttempt ? incident?.timeline.reduce<typeof incident.timeline[number] | undefined>((latest, entry) => {
+    if (entry.kind !== "vendor_timeout_scheduled" || entry.metadata.vendor_id !== pendingAttempt.vendor_id) return latest;
+    if (!latest || new Date(entry.at).getTime() >= new Date(latest.at).getTime()) return entry;
+    return latest;
+  }, undefined) : undefined;
   const fallback = incident?.timeline.find((entry) => entry.kind === "vendor_dispatch_outcome" && (entry.metadata.outcome === "decline" || entry.metadata.outcome === "timeout"));
-  const accepted = incident?.timeline.find((entry) => entry.kind === "vendor_dispatch_outcome" && entry.metadata.outcome === "accept");
+  const vendorBAccepted = vendorBAttempt?.outcome === "accepted" || incident?.timeline.some((entry) => entry.kind === "vendor_dispatch_outcome" && entry.metadata.vendor_id === "vendor-b" && entry.metadata.outcome === "accept");
+  const vendorATimedOut = vendorAAttempt?.outcome === "timed_out" || vendorAAttempt?.outcome === "declined";
 
   useEffect(() => {
-    if (!pendingAttempt || !timeoutSchedule) {
+    if (!pendingAttempt) {
       setTimeoutCountdown(null);
       return;
     }
-    const configuredSeconds = Number(timeoutSchedule.metadata.timeout_seconds ?? 0);
-    const deadline = timeoutSchedule.metadata.deadline_at ? new Date(String(timeoutSchedule.metadata.deadline_at)).getTime() : 0;
+    const configuredSeconds = Number(timeoutSchedule?.metadata.timeout_seconds ?? 0);
+    const deadlineValue = pendingAttempt.deadline_at ?? timeoutSchedule?.metadata.deadline_at;
+    const deadline = deadlineValue ? new Date(String(deadlineValue)).getTime() : 0;
+    const attemptStartedAt = new Date(pendingAttempt.at).getTime();
+    const deadlineDuration = deadline && Number.isFinite(attemptStartedAt) ? Math.ceil((deadline - attemptStartedAt) / 1000) : 0;
+    const anchorKey = `${incident?.incident_id}:${pendingAttempt.attempt_id}`;
+    if (timeoutCountdownAnchor.current?.key !== anchorKey) {
+      timeoutCountdownAnchor.current = { key: anchorKey, startedAt: Date.now() };
+    }
     const calculate = () => {
-      if (runtime?.demo_clock_enabled) return Math.max(0, configuredSeconds - Math.floor((Date.now() - performance.timeOrigin) / 1000));
+      if (runtime?.demo_clock_enabled) {
+        const duration = deadlineDuration > 0 ? deadlineDuration : configuredSeconds;
+        return Math.max(0, duration - Math.floor((Date.now() - timeoutCountdownAnchor.current!.startedAt) / 1000));
+      }
       return deadline ? Math.max(0, Math.ceil((deadline - Date.now()) / 1000)) : configuredSeconds;
     };
     setTimeoutCountdown(calculate());
     const timer = window.setInterval(() => setTimeoutCountdown(calculate()), 1000);
     return () => window.clearInterval(timer);
-  }, [incident?.incident_id, pendingAttempt?.event_id, timeoutSchedule?.event_id, runtime?.demo_clock_enabled]);
+  }, [incident?.incident_id, pendingAttempt?.attempt_id, pendingAttempt?.at, pendingAttempt?.deadline_at, timeoutSchedule?.event_id, runtime?.demo_clock_enabled]);
 
   async function startReplay() {
     setError(""); replayRunningRef.current = true; setReplayRunning(true);
@@ -252,7 +275,7 @@ function App() {
         <section className="lane-grid">
           <div className="lane panel"><div className="lane-heading"><div><span className="kicker">LANE 01</span><h2><MessageCircle size={18} /> Tenant conversation</h2></div><span className="event-count">{tenantCommunications.length} contacts</span></div>{tenantCommunications.length ? <div className="communication-list">{tenantCommunications.map((item) => <CommunicationCard key={item.communication_id} communication={item} mediaById={mediaById} />)}</div> : <div className="empty-state compact"><MessageCircle size={24} /><p>Waiting for the tenant’s Telegram report.</p></div>}</div>
           <div className="lane panel"><div className="lane-heading"><div><span className="kicker">LANE 02</span><h2><ShieldCheck size={18} /> Agent decisions / state</h2></div><span className="state-chip">{incident.status}</span></div><div className="decision-summary"><div className="decision-state"><span>WORKFLOW STATE</span><strong>{incident.status}</strong></div><div className="decision-stats"><span><Clock3 size={13} /> {incident.vendor_attempts.length} vendor attempts</span><span><LockKeyhole size={13} /> S$ {incident.work_order?.spending_limit.toFixed(0) ?? "250"} autonomous cap</span></div></div>{incident.report_assessment && <div className="assessment-box"><div className="assessment-title"><Sparkles size={14} /> MULTIMODAL ASSESSMENT · {Math.round(incident.report_assessment.confidence * 100)}% confidence</div><p className="transcript-label">Faithful voice transcript</p><p className="transcript">{incident.report_assessment.voice_transcript || "No voice transcript supplied."}</p>{reportAudio && <MediaView media={reportAudio} />}<div className="assessment-facts"><span>{incident.report_assessment.facts.issue_type}</span><span>{incident.report_assessment.facts.severity}</span><span>{incident.report_assessment.facts.water_visible ? "water visible" : "no water visible"}</span></div>{incident.report_assessment.missing_information.length > 0 && <small className="warning-note">Missing: {incident.report_assessment.missing_information.join(", ")}</small>}</div>}{incident.containment_instructions && <div className="containment"><div className="containment-title"><ShieldCheck size={15} /> PROPERTY-SPECIFIC CONTAINMENT SENT</div><p>{incident.containment_instructions}</p></div>}{agentCommunications.length > 0 && <div className="agent-contacts">{agentCommunications.map((item) => <CommunicationCard key={item.communication_id} communication={item} mediaById={mediaById} />)}</div>}<div className="policy-note"><LockKeyhole size={14} /><span>Gemini observes. Deterministic rules authorize safety, spend, access, dispatch, and closure.</span></div></div>
-          <div className="lane panel"><div className="lane-heading"><div><span className="kicker">LANE 03</span><h2><Wrench size={18} /> Vendor conversation</h2></div><span className="event-count">{vendorCommunications.length} contacts</span></div>{vendorCommunications.length ? <div className="communication-list">{vendorCommunications.map((item) => <CommunicationCard key={item.communication_id} communication={item} mediaById={mediaById} />)}</div> : <div className="empty-state compact"><Wrench size={24} /><p>Dispatch contacts will appear after triage.</p></div>}<div className="vendor-proof"><div className={pendingAttempt ? "proof-active" : fallback ? "proof-active" : ""}>{pendingAttempt ? <Clock3 size={14} /> : <AlertTriangle size={14} />} Vendor A {pendingAttempt ? `timeout in ${timeoutCountdown ?? "…"}s` : fallback ? "timed out / failed" : "awaiting response"}</div><div className={accepted ? "proof-active" : ""}><Check size={14} /> Vendor B {accepted ? "fallback accepted" : "standby"}</div></div></div>
+          <div className="lane panel"><div className="lane-heading"><div><span className="kicker">LANE 03</span><h2><Wrench size={18} /> Vendor conversation</h2></div><span className="event-count">{vendorCommunications.length} contacts</span></div>{vendorCommunications.length ? <div className="communication-list">{vendorCommunications.map((item) => <CommunicationCard key={item.communication_id} communication={item} mediaById={mediaById} />)}</div> : <div className="empty-state compact"><Wrench size={24} /><p>Dispatch contacts will appear after triage.</p></div>}<div className="vendor-proof"><div className={vendorAAttempt?.outcome === "pending" || vendorATimedOut ? "proof-active" : ""}>{vendorAAttempt?.outcome === "pending" ? <Clock3 size={14} /> : <AlertTriangle size={14} />} Vendor A {vendorAAttempt?.outcome === "pending" ? `timeout in ${timeoutCountdown ?? "…"}s` : vendorATimedOut ? "timed out / failed" : "awaiting response"}</div><div className={vendorBAccepted || vendorBAttempt?.outcome === "pending" ? "proof-active" : ""}><Check size={14} /> Vendor B {vendorBAccepted ? "accepted" : vendorBAttempt?.outcome === "pending" ? `waiting for response · ${Math.floor((timeoutCountdown ?? 0) / 60).toString().padStart(2, "0")}:${((timeoutCountdown ?? 0) % 60).toString().padStart(2, "0")} remaining` : "standby"}</div></div></div>
         </section>
         <section className="lower-grid"><div className="timeline-card panel"><div className="panel-heading"><div><span className="kicker">PERSISTED AUDIT TIMELINE</span><h2>State changes and rule outcomes</h2></div><span className="event-count">{incident.timeline.length} events</span></div><div className="timeline">{incident.timeline.map((entry) => <div className="timeline-item" key={`${entry.event_id}-${entry.kind}`}><div className="timeline-dot" /><div className="timeline-copy"><div className="timeline-meta"><span>{formatTime(entry.at)}</span>{entry.rule_id && <code>{entry.rule_id}</code>}</div><strong>{timelineLabel(entry.kind)}</strong>{entry.state_to && <span className="transition">{entry.state_from} → {entry.state_to}</span>}{Boolean(entry.metadata.vendor_id) && <span className="timeline-detail">{String(entry.metadata.vendor_id)} · {String(entry.metadata.outcome ?? "")}</span>}{Boolean(entry.metadata.blocking_reasons) && <span className="timeline-detail danger-text">{String(entry.metadata.blocking_reasons)}</span>}</div></div>)}</div></div><div className="outcome-card panel"><div className="panel-heading"><div><span className="kicker">CONTROL GATES</span><h2>Exceptions stay narrow.</h2></div><Activity size={21} /></div><div className="guardrail-list"><div className={`guardrail ${fallback ? "active" : ""}`}><span className="guardrail-icon"><CircleAlert size={15} /></span><span><strong>Vendor fallback</strong><small>{fallback ? "Next eligible vendor contacted" : "Bounded vendor ranking"}</small></span></div><div className={`guardrail ${incident.approval ? "active" : ""}`}><span className="guardrail-icon"><LockKeyhole size={15} /></span><span><strong>Spending authority</strong><small>{incident.approval ? "Approval required" : "S$250 autonomous limit"}</small></span></div><div className={`guardrail ${incident.last_evidence?.passed ? "active" : ""}`}><span className="guardrail-icon"><ShieldCheck size={15} /></span><span><strong>Evidence gate</strong><small>{incident.last_evidence?.passed ? "Photo + invoice verified" : "Missing or mismatched evidence blocks close"}</small></span></div><div className={`guardrail ${incident.status === "CLOSED" ? "active" : ""}`}><span className="guardrail-icon"><Check size={15} /></span><span><strong>Current state</strong><small>{statusLabel(incident.status)}</small></span></div></div><div className="final-state"><span>WORKFLOW STATE</span><strong>{incident.status}</strong>{incident.warranty_expires_at && <small>Warranty through {new Date(incident.warranty_expires_at).toLocaleDateString()}</small>}</div></div></section>
       </>}
