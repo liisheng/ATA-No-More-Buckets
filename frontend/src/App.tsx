@@ -139,10 +139,8 @@ function App() {
       };
       let incidentsResolved = false;
       let selectedIncident = false;
-      let drafts: TelegramDraft[] | undefined;
 
       void api.drafts().then((nextDrafts) => {
-        drafts = nextDrafts;
         applySlice("drafts", undefined, () => {
           latestDrafts.current = nextDrafts;
           if (incidentsResolved && !selectedIncident && selectedIncidentId.current === null) setDraft(latestDrafts.current[0] ?? null);
@@ -159,7 +157,7 @@ function App() {
         if (!selected) {
           selectedIncident = false;
           selectedIncidentId.current = null;
-          setIncident(null); setCommunications([]); setMedia([]); setDraft(latestDrafts.current[0] ?? drafts?.[0] ?? null);
+          setIncident(null); setCommunications([]); setMedia([]); setDraft(latestDrafts.current[0] ?? null);
           return;
         }
         selectedIncident = true;

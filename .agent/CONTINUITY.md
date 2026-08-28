@@ -27,6 +27,7 @@
 
 ## [PROGRESS]
 
+- 2026-08-28T20:29+08:00 [CODE] Removed the per-refresh draft fallback so an applied empty draft snapshot remains authoritative over late older non-empty draft results; added an out-of-order regression test.
 - 2026-08-28T20:25+08:00 [CODE] Live polling now retains the latest successfully applied draft list in a shared ref; empty incident-list responses use that ref, preventing overlapping polls from hiding valid local drafts.
 - 2026-08-28T20:05+08:00 [CODE] Replaced request-start invalidation with per-slice applied-generation tracking so slow successful responses remain eligible until a newer response for that slice is applied; selected-incident guards reject late detail results for superseded incidents.
 - 2026-08-28T20:02+08:00 [CODE] Reworked live refresh to apply incidents, drafts, and each detail slice as individual requests settle; monotonically increasing refresh IDs discard late results from older polling cycles.
@@ -94,6 +95,7 @@
 
 ## [OUTCOMES]
 
+- 2026-08-28T20:29+08:00 [TOOL] Verification for the draft-authority follow-up passes: frontend lint, 14 Vitest tests, production build, 3 Playwright scenarios, backend 62 passed/1 skipped, Ruff, mypy, and `git diff --check`.
 - 2026-08-28T20:25+08:00 [TOOL] Verification for the overlapping-draft follow-up passes: frontend lint, 13 Vitest tests, production build, 3 Playwright scenarios, backend 62 passed/1 skipped, Ruff, mypy, and `git diff --check`.
 - 2026-08-28T20:05+08:00 [TOOL] Verification for the slow-response freshness follow-up passes: frontend lint, 12 Vitest tests, production build, 3 Playwright scenarios, backend 62 passed/1 skipped, Ruff, mypy, and `git diff --check`.
 - 2026-08-28T20:02+08:00 [TOOL] Verification for polling concurrency follow-up passes: frontend lint, 11 Vitest tests, production build, 3 Playwright scenarios, backend 62 passed/1 skipped, Ruff, mypy, and `git diff --check`.

@@ -249,6 +249,35 @@ it("keeps an early draft visible when a later empty incident poll wins", async (
   await act(async () => { releaseFirstIncident(); });
 });
 
+it("keeps a newer empty draft snapshot authoritative over an older draft response", async () => {
+  const draft = {
+    draft_id: "draft-stale", tenant_id: "tenant-1", property_id: "unit-1", text_parts: ["Stale draft"],
+    media: [], communications: [], created_at: "2026-08-28T10:00:00Z", updated_at: "2026-08-28T10:00:01Z", expires_at: "2026-08-28T10:15:00Z",
+  };
+  let incidentRequests = 0;
+  let draftRequests = 0;
+  let releaseFirstIncident!: () => void;
+  const delayedFirstIncident = new Promise<Response>((resolve) => { releaseFirstIncident = () => resolve({ ok: true, json: async () => [] } as Response); });
+  vi.stubGlobal("fetch", vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
+    const path = String(input);
+    if (path.endsWith("/api/runtime")) return { ok: true, json: async () => ({ environment: "demo", deployment: "local_container", facts_provider: "deterministic", facts_model: "gemini-3.5-flash", storage_backend: "memory", eventing: "local", messaging_provider: "local_demo", demo_clock_enabled: true, demo_timings_seconds: {}, synthetic_data_only: true }) };
+    if (path.endsWith("/api/incidents")) {
+      if (incidentRequests++ === 0) return delayedFirstIncident;
+      return new Promise<Response>(() => undefined);
+    }
+    if (path.endsWith("/api/drafts")) return draftRequests++ === 0
+      ? { ok: true, json: async () => [draft] }
+      : { ok: true, json: async () => [] };
+    return { ok: true, json: async () => [] };
+  }));
+
+  render(<App />);
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1100)); });
+  await act(async () => { releaseFirstIncident(); });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  expect(screen.queryByText("Stale draft")).not.toBeInTheDocument();
+});
+
 it("discards out-of-order results from an older polling cycle", async () => {
   const oldIncident = {
     incident_id: "inc-old-poll", property_id: "unit-1", tenant_id: "tenant-1", status: "DISPATCHING" as const,
