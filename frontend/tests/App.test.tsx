@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
 import App from "../src/App";
 import { api } from "../src/api";
@@ -155,6 +155,76 @@ it("updates the incident and communications when media polling fails", async () 
   await screen.findByText("Current incident status");
   expect(screen.getByText("Communication is current")).toBeInTheDocument();
   expect(screen.getByText(/Media refresh failed: media unavailable/i)).toBeInTheDocument();
+});
+
+it("renders incident details before a deferred media request completes", async () => {
+  const incident = {
+    incident_id: "inc-deferred-media", property_id: "unit-1", tenant_id: "tenant-1", status: "DISPATCHING" as const,
+    report_text: "Immediate incident status", media_ids: [], vendor_attempts: [],
+    created_at: "2026-08-28T10:00:00Z", updated_at: "2026-08-28T10:00:01Z", timeline: [],
+  };
+  const communication = {
+    communication_id: "comm-1", incident_id: "inc-deferred-media", sender_role: "tenant" as const, sender_id: "tenant-1",
+    recipient_role: "agent" as const, recipient_id: "agent", channel: "telegram", direction: "inbound" as const,
+    message_type: "text" as const, text: "Immediate communication", media_ids: [], delivery_status: "received" as const,
+    timestamp: "2026-08-28T10:00:00Z",
+  };
+  let releaseMedia!: () => void;
+  const deferredMedia = new Promise<Response>((resolve) => { releaseMedia = () => resolve({ ok: true, json: async () => [] } as Response); });
+  vi.stubGlobal("fetch", vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
+    const path = String(input);
+    if (path.endsWith("/api/runtime")) return { ok: true, json: async () => ({ environment: "live", deployment: "cloud_run", facts_provider: "gemini", facts_model: "gemini-3.5-flash", storage_backend: "firestore", eventing: "cloud_tasks", messaging_provider: "telegram", demo_clock_enabled: false, demo_timings_seconds: {}, synthetic_data_only: false }) };
+    if (path.endsWith("/api/incidents")) return { ok: true, json: async () => [incident] };
+    if (path.endsWith("/api/drafts")) return { ok: false, status: 404, text: async () => "private" };
+    if (path.endsWith("/api/incidents/inc-deferred-media")) return { ok: true, json: async () => incident };
+    if (path.endsWith("/communications")) return { ok: true, json: async () => [communication] };
+    if (path.endsWith("/media")) return deferredMedia;
+    return { ok: true, json: async () => [] };
+  }));
+
+  render(<App />);
+  await screen.findByText("Immediate incident status");
+  expect(screen.getByText("Immediate communication")).toBeInTheDocument();
+  expect(screen.queryByText(/Media refresh failed/i)).not.toBeInTheDocument();
+  await act(async () => { releaseMedia(); });
+});
+
+it("discards out-of-order results from an older polling cycle", async () => {
+  const oldIncident = {
+    incident_id: "inc-old-poll", property_id: "unit-1", tenant_id: "tenant-1", status: "DISPATCHING" as const,
+    report_text: "Old incident status", media_ids: [], vendor_attempts: [],
+    created_at: "2026-08-28T10:00:00Z", updated_at: "2026-08-28T10:00:01Z", timeline: [],
+  };
+  const newIncident = { ...oldIncident, incident_id: "inc-new-poll", report_text: "New incident status", updated_at: "2026-08-28T10:00:02Z" };
+  const communication = {
+    communication_id: "comm-new", incident_id: "inc-new-poll", sender_role: "tenant" as const, sender_id: "tenant-1",
+    recipient_role: "agent" as const, recipient_id: "agent", channel: "telegram", direction: "inbound" as const,
+    message_type: "text" as const, text: "New communication", media_ids: [], delivery_status: "received" as const,
+    timestamp: "2026-08-28T10:00:02Z",
+  };
+  let incidentsPoll = 0;
+  let rejectOldCommunications!: (reason: Error) => void;
+  const oldCommunications = new Promise<Response>((_, reject) => { rejectOldCommunications = reject; });
+  vi.stubGlobal("fetch", vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
+    const path = String(input);
+    if (path.endsWith("/api/runtime")) return { ok: true, json: async () => ({ environment: "live", deployment: "cloud_run", facts_provider: "gemini", facts_model: "gemini-3.5-flash", storage_backend: "firestore", eventing: "cloud_tasks", messaging_provider: "telegram", demo_clock_enabled: false, demo_timings_seconds: {}, synthetic_data_only: false }) };
+    if (path.endsWith("/api/incidents")) return { ok: true, json: async () => (++incidentsPoll === 1 ? [oldIncident] : [newIncident]) };
+    if (path.endsWith("/api/drafts")) return { ok: false, status: 404, text: async () => "private" };
+    if (path.endsWith("/api/incidents/inc-old-poll")) return new Promise<Response>(() => undefined);
+    if (path.endsWith("/api/incidents/inc-new-poll")) return { ok: true, json: async () => newIncident };
+    if (path.endsWith("/inc-old-poll/communications")) return oldCommunications;
+    if (path.endsWith("/inc-new-poll/communications")) return { ok: true, json: async () => [communication] };
+    if (path.endsWith("/media")) return { ok: true, json: async () => [] };
+    return { ok: true, json: async () => [] };
+  }));
+
+  render(<App />);
+  await screen.findByText("New incident status", {}, { timeout: 2500 });
+  expect(screen.getByText("New communication")).toBeInTheDocument();
+  rejectOldCommunications(new Error("old communications failure"));
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  expect(screen.queryByText(/old communications failure/i)).not.toBeInTheDocument();
+  expect(screen.getByText("New incident status")).toBeInTheDocument();
 });
 
 it("surfaces meaningful incident polling failures", async () => {

@@ -112,6 +112,7 @@ function App() {
   const [timeoutCountdown, setTimeoutCountdown] = useState<number | null>(null);
   const timeoutCountdownAnchor = useRef<{ key: string; startedAt: number } | null>(null);
   const selectedIncidentId = useRef<string | null>(null);
+  const liveRefreshId = useRef(0);
   const replayGeneration = useRef(0);
   const replayRunningRef = useRef(false);
 
@@ -121,44 +122,79 @@ function App() {
 
   useEffect(() => {
     let active = true;
-    async function refreshLiveIncident() {
+    function refreshLiveIncident() {
       if (replayRunning) return;
-      try {
-        const [incidentsResult, draftsResult] = await Promise.allSettled([api.incidents(), api.drafts()]);
-        if (incidentsResult.status === "rejected") throw incidentsResult.reason;
-        const incidents = incidentsResult.value;
-        const drafts = draftsResult.status === "fulfilled" ? draftsResult.value : [];
-        if (!active || replayRunningRef.current) return;
+      const refreshId = ++liveRefreshId.current;
+      const isCurrent = () => active && refreshId === liveRefreshId.current && !replayRunningRef.current;
+      const errors = new Map<string, string>();
+      const updateErrors = (key: string, message?: string) => {
+        if (!isCurrent()) return;
+        if (message) errors.set(key, message); else errors.delete(key);
+        setError([...errors.values()].join(" · "));
+      };
+      let incidentsResolved = false;
+      let selectedIncident = false;
+      let drafts: TelegramDraft[] | undefined;
+
+      void api.drafts().then((nextDrafts) => {
+        if (!isCurrent()) return;
+        drafts = nextDrafts;
+        updateErrors("drafts");
+        if (incidentsResolved && !selectedIncident) setDraft(nextDrafts[0] ?? null);
+      }).catch((reason: unknown) => {
+        if (!isCurrent()) return;
+        updateErrors("drafts", `Draft inspection failed: ${reason instanceof Error ? reason.message : "unknown error"}`);
+      });
+
+      void api.incidents().then((incidents) => {
+        if (!isCurrent()) return;
+        incidentsResolved = true;
         const next = [...incidents].sort((left, right) => right.updated_at.localeCompare(left.updated_at));
         const selected = next[0];
         if (!selected) {
-          if (draftsResult.status === "rejected") throw draftsResult.reason;
+          selectedIncident = false;
           selectedIncidentId.current = null;
-          setIncident(null); setCommunications([]); setMedia([]); setDraft(drafts[0] ?? null);
-          setError("");
+          setIncident(null); setCommunications([]); setMedia([]); setDraft(drafts?.[0] ?? null);
+          updateErrors("incidents");
           return;
         }
+        selectedIncident = true;
         selectedIncidentId.current = selected.incident_id;
         setDraft(null);
-        const [incidentResult, communicationsResult, mediaResult] = await Promise.allSettled([
-          api.incident(selected.incident_id), api.communications(selected.incident_id), api.media(selected.incident_id),
-        ]);
-        if (!active || replayRunningRef.current) return;
-        const errors: string[] = [];
-        if (incidentResult.status === "fulfilled") setIncident(incidentResult.value);
-        else errors.push(`Incident refresh failed: ${incidentResult.reason instanceof Error ? incidentResult.reason.message : "unknown error"}`);
-        if (communicationsResult.status === "fulfilled") setCommunications(communicationsResult.value);
-        else errors.push(`Communications refresh failed: ${communicationsResult.reason instanceof Error ? communicationsResult.reason.message : "unknown error"}`);
-        if (mediaResult.status === "fulfilled") setMedia(mediaResult.value);
-        else errors.push(`Media refresh failed: ${mediaResult.reason instanceof Error ? mediaResult.reason.message : "unknown error"}`);
-        if (draftsResult.status === "rejected") errors.push(`Draft inspection failed: ${draftsResult.reason instanceof Error ? draftsResult.reason.message : "unknown error"}`);
-        setError(errors.join(" · "));
-      } catch (err) {
-        if (active && !replayRunning) setError(err instanceof Error ? err.message : "Live update failed");
-      }
+        updateErrors("incidents");
+
+        void api.incident(selected.incident_id).then((current) => {
+          if (!isCurrent()) return;
+          setIncident(current);
+          updateErrors("incident");
+        }).catch((reason: unknown) => {
+          if (!isCurrent()) return;
+          updateErrors("incident", `Incident refresh failed: ${reason instanceof Error ? reason.message : "unknown error"}`);
+        });
+        void api.communications(selected.incident_id).then((nextCommunications) => {
+          if (!isCurrent()) return;
+          setCommunications(nextCommunications);
+          updateErrors("communications");
+        }).catch((reason: unknown) => {
+          if (!isCurrent()) return;
+          updateErrors("communications", `Communications refresh failed: ${reason instanceof Error ? reason.message : "unknown error"}`);
+        });
+        void api.media(selected.incident_id).then((nextMedia) => {
+          if (!isCurrent()) return;
+          setMedia(nextMedia);
+          updateErrors("media");
+        }).catch((reason: unknown) => {
+          if (!isCurrent()) return;
+          updateErrors("media", `Media refresh failed: ${reason instanceof Error ? reason.message : "unknown error"}`);
+        });
+      }).catch((reason: unknown) => {
+        if (!isCurrent()) return;
+        incidentsResolved = true;
+        updateErrors("incidents", reason instanceof Error ? reason.message : "Live update failed");
+      });
     }
-    void refreshLiveIncident();
-    const timer = window.setInterval(() => void refreshLiveIncident(), 1000);
+    refreshLiveIncident();
+    const timer = window.setInterval(refreshLiveIncident, 1000);
     return () => { active = false; window.clearInterval(timer); };
   }, [replayRunning]);
 
