@@ -118,7 +118,15 @@ def submit_draft(client: TestClient, service, update_id: int):
 
 
 def move_vendor_a_timeout(client: TestClient, service):
-    task = next(task for task in service.tasks.tasks.values() if task["type"] == "vendor_timeout")
+    task = next(
+        task
+        for task in service.tasks.tasks.values()
+        if task["type"] == "vendor_timeout"
+        and any(
+            attempt.vendor_id == "vendor-a" and attempt.outcome == "pending"
+            for attempt in service.get_incident(task["incident_id"]).vendor_attempts
+        )
+    )
     attempt = next(attempt for attempt in service.get_incident(task["incident_id"]).vendor_attempts if attempt.vendor_id == "vendor-a")
     service.clock.current = attempt.deadline_at
     response = client.post(
@@ -462,13 +470,13 @@ def test_over_limit_quote_escalates(monkeypatch, service):
     assert service.get_incident(incident.incident_id).status.value == "ESCALATED"
 
 
-def test_vendor_group_member_without_authorized_user_id_cannot_mutate_job(monkeypatch, service):
+def test_paired_vendor_group_members_share_the_session_boundary(monkeypatch, service):
     client, _ = configure(monkeypatch, service)
     start_report(client, 2310)
     submit_draft(client, service, 2313)
     incident = move_vendor_a_timeout(client, service)
     session = service.repository.list_vendor_sessions("7202")[0]
-    unauthorized_accept = post(client, {
+    group_member_accept = post(client, {
         "update_id": 2314,
         "callback_query": {
             "id": "unauthorized-accept",
@@ -477,18 +485,16 @@ def test_vendor_group_member_without_authorized_user_id_cannot_mutate_job(monkey
             "message": {"chat": {"id": 7202}},
         },
     })
-    assert unauthorized_accept.json()["kind"] == "vendor_sender_unauthorized"
-    assert service.get_incident(incident.incident_id).status.value == "DISPATCHING"
-    assert service.repository.get_vendor_session(session.session_id).stage == "OFFERED"
+    assert group_member_accept.json()["kind"] == "vendor_session_callback"
+    assert service.get_incident(incident.incident_id).status.value == "SCHEDULED"
+    assert service.repository.get_vendor_session(session.session_id).stage == "AWAITING_PRICE"
 
-    accepted = post(client, {"update_id": 2315, "callback_query": {"id": "authorized-accept", "data": f"vs:{session.session_id}:ac", "message": {"chat": {"id": 7202}}}})
-    assert accepted.json()["kind"] == "vendor_session_callback"
-    unauthorized_price = post(client, {
+    group_member_price = post(client, {
         "update_id": 2316,
         "message": {"chat": {"id": 7202}, "from": {"id": "another-group-member"}, "text": "220"},
     })
-    assert unauthorized_price.json()["kind"] == "vendor_sender_unauthorized"
-    assert service.repository.get_vendor_session(session.session_id).draft_price is None
+    assert group_member_price.json()["kind"] == "vendor_price"
+    assert service.repository.get_vendor_session(session.session_id).draft_price == 220
 
 
 def test_start_completion_evidence_and_tenant_buttons(monkeypatch, service):
@@ -561,6 +567,70 @@ def test_completion_final_price_edit_confirm_submit(monkeypatch, service):
     assert any("Submit completion" in str(message.reply_markup) for message in service.notifications.messages)
     post(client, {"update_id": 2436, "callback_query": {"id": "cs-2436", "data": f"vs:{session.session_id}:cs", "message": {"chat": {"id": 7202}}}})
     assert service.get_incident(incident.incident_id).status.value == "PROVISIONALLY_RESOLVED"
+
+
+def test_failed_completion_evidence_keeps_session_retryable(monkeypatch, service):
+    client, fake = configure(monkeypatch, service)
+    start_report(client, 2510)
+    incident = submit_draft(client, service, 2513)
+    incident = move_vendor_a_timeout(client, service)
+    accept_and_start_vendor_b(client, incident, 2514)
+    session = service.repository.list_vendor_sessions("7202")[0]
+    post(client, {"update_id": 2521, "message": {"chat": {"id": 7202}, "photo": [{"file_id": "bad-after"}]}})
+    post(client, {"update_id": 2522, "message": {"chat": {"id": 7202}, "text": "Replaced the failed sink seal and tested the joint."}})
+    session = service.repository.get_vendor_session(session.session_id)
+    post(client, {"update_id": 2523, "callback_query": {"id": "fp-2523", "data": f"vs:{session.session_id}:fp", "message": {"chat": {"id": 7202}}}})
+    failed = post(client, {"update_id": 2524, "callback_query": {"id": "cs-2524", "data": f"vs:{session.session_id}:cs", "message": {"chat": {"id": 7202}}}})
+
+    assert failed.json()["kind"] == "vendor_session_callback"
+    current = service.get_incident(incident.incident_id)
+    recovered = service.repository.get_vendor_session(session.session_id)
+    assert current.status.value == "IN_PROGRESS"
+    assert recovered.stage == "AWAITING_PHOTO"
+    assert recovered.submitted is False
+    assert any("Completion was not accepted" in message.text for message in fake.messages)
+    assert not any("evidence passed" in message.text.lower() for message in fake.messages)
+
+
+def test_sequential_incidents_use_the_active_session_not_history(monkeypatch, service):
+    client, _ = configure(monkeypatch, service)
+    start_report(client, 2530)
+    first = submit_draft(client, service, 2533)
+    first = move_vendor_a_timeout(client, service)
+    accept_and_start_vendor_b(client, first, 2534)
+    first_session = service.repository.list_vendor_sessions("7202")[0]
+    post(client, {"update_id": 2541, "message": {"chat": {"id": 7202}, "photo": [{"file_id": "first-after"}]}})
+    post(client, {"update_id": 2542, "message": {"chat": {"id": 7202}, "text": "Replaced the failed sink seal and tested the joint."}})
+    post(client, {"update_id": 2543, "callback_query": {"id": "first-fp", "data": f"vs:{first_session.session_id}:fp", "message": {"chat": {"id": 7202}}}})
+    post(client, {"update_id": 2544, "callback_query": {"id": "first-cs", "data": f"vs:{first_session.session_id}:cs", "message": {"chat": {"id": 7202}}}})
+    assert service.get_incident(first.incident_id).status.value == "PROVISIONALLY_RESOLVED"
+    post(client, {"update_id": 2545, "callback_query": {"id": "first-dry", "data": f"tenant:{first.incident_id}:dry", "message": {"chat": {"id": 7101}}}})
+    assert service.get_incident(first.incident_id).status.value == "CLOSED"
+
+    start_report(client, 2550)
+    second = submit_draft(client, service, 2553)
+    second = move_vendor_a_timeout(client, service)
+    accepted = post(client, {"update_id": 2554, "callback_query": {"id": "second-accept", "data": f"vendor:{second.incident_id}:accept", "message": {"chat": {"id": 7202}}}})
+    assert accepted.json()["kind"] == "vendor_callback"
+    sessions = service.repository.list_vendor_sessions("7202")
+    second_session = next(session for session in sessions if session.incident_id == second.incident_id)
+    post(client, {"update_id": 2555, "message": {"chat": {"id": 7202}, "text": "220"}})
+    post(client, {"update_id": 2556, "callback_query": {"id": "second-pc", "data": f"vs:{second_session.session_id}:pc", "message": {"chat": {"id": 7202}}}})
+    post(client, {"update_id": 2557, "message": {"chat": {"id": 7202}, "text": "20"}})
+    post(client, {"update_id": 2558, "callback_query": {"id": "second-ec", "data": f"vs:{second_session.session_id}:ec", "message": {"chat": {"id": 7202}}}})
+    post(client, {"update_id": 2559, "callback_query": {"id": "second-su", "data": f"vs:{second_session.session_id}:su", "message": {"chat": {"id": 7202}}}})
+    post(client, {"update_id": 2560, "callback_query": {"id": "second-start", "data": f"vendor:{second.incident_id}:start", "message": {"chat": {"id": 7202}}}})
+    post(client, {"update_id": 2561, "callback_query": {"id": "second-prepare", "data": f"vs:{second_session.session_id}:pr", "message": {"chat": {"id": 7202}}}})
+    post(client, {"update_id": 2562, "message": {"chat": {"id": 7202}, "photo": [{"file_id": "second-after"}]}})
+    post(client, {"update_id": 2563, "message": {"chat": {"id": 7202}, "text": "Replaced the failed sink seal and tested the joint."}})
+    post(client, {"update_id": 2564, "callback_query": {"id": "second-fp", "data": f"vs:{second_session.session_id}:fp", "message": {"chat": {"id": 7202}}}})
+    post(client, {"update_id": 2565, "callback_query": {"id": "second-cs", "data": f"vs:{second_session.session_id}:cs", "message": {"chat": {"id": 7202}}}})
+
+    assert service.get_incident(second.incident_id).status.value == "PROVISIONALLY_RESOLVED"
+    assert service.get_incident(second.incident_id).eta is not None
+    assert service.get_incident(second.incident_id).work_order is not None
+    assert service.repository.get_vendor_session(first_session.session_id).stage == "COMPLETED"
+    assert service.repository.get_vendor_session(second_session.session_id).stage == "COMPLETED"
 
 
 def test_cancel_completion_draft_keeps_accepted_job_resumable(monkeypatch, service):

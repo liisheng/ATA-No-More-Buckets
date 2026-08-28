@@ -397,7 +397,7 @@ def test_explicit_approval_sets_authority_and_never_happens_for_safety(
     assert ignored.work_order is None
 
 
-def test_missing_or_mismatched_evidence_cannot_close(
+def test_missing_or_mismatched_evidence_can_be_corrected_without_false_success(
     service, report_media, completion_media
 ) -> None:
     incident = service.submit_report(make_report(report_media, key="evidence"))
@@ -412,7 +412,7 @@ def test_missing_or_mismatched_evidence_cannot_close(
             payload={},
         ),
     )
-    assert incident.status == IncidentStatus.ESCALATED
+    assert incident.status == IncidentStatus.IN_PROGRESS
     assert incident.last_evidence and not incident.last_evidence.passed
 
 

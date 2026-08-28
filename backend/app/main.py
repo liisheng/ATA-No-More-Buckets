@@ -201,17 +201,6 @@ def _vendor_for_chat(chat_id: str) -> Vendor | None:
     return next((vendor for vendor in service.vendors if vendor.telegram_chat_id == chat_id), None)
 
 
-def _telegram_sender_id(payload: dict) -> str | None:
-    sender = payload.get("from")
-    if not isinstance(sender, dict) or sender.get("id") is None:
-        return None
-    return str(sender["id"])
-
-
-def _authorized_vendor_sender(vendor: Vendor, sender_id: str | None) -> bool:
-    return bool(sender_id and sender_id in vendor.authorized_telegram_user_ids)
-
-
 def _vendor_session_for_chat(chat_id: str, session_id: str | None = None, incident_id: str | None = None, vendor_id: str | None = None) -> VendorSession | None:
     if incident_id and vendor_id:
         return service.repository.find_vendor_session(chat_id, vendor_id, incident_id)
@@ -702,11 +691,6 @@ def telegram_webhook(
         callback_data = callback.get("data", "")
         parts = callback_data.split(":") if isinstance(callback_data, str) else []
         provider_message_id = str(callback.get("id") or message.get("message_id") or update_id)
-        callback_vendor = _vendor_for_chat(chat_id)
-        if callback_vendor and not _authorized_vendor_sender(callback_vendor, _telegram_sender_id(callback)):
-            _answer_callback(callback.get("id"), "This Telegram user is not authorized for this vendor job.", True)
-            return {"status": "processed", "kind": "vendor_sender_unauthorized"}
-
         if len(parts) == 3 and parts[0] == "draft":
             if parts[2] == "add":
                 _answer_callback(
@@ -964,7 +948,7 @@ def telegram_webhook(
     if command == "/start":
         if len(command_parts) == 2:
             try:
-                record = service.consume_pairing_code(command_parts[1], chat_id, _telegram_sender_id(message))
+                record = service.consume_pairing_code(command_parts[1], chat_id)
             except ValueError as exc:
                 raise HTTPException(status_code=403, detail=str(exc)) from exc
             if hasattr(service.notifications, "send"):
@@ -1197,8 +1181,6 @@ def telegram_webhook(
         return {"status": "processed", "kind": "report_command_required"}
 
     if vendor:
-        if not _authorized_vendor_sender(vendor, _telegram_sender_id(message)):
-            return {"status": "ignored", "kind": "vendor_sender_unauthorized"}
         vendor_incident = _active_vendor_incident(vendor.vendor_id)
         if not vendor_incident:
             service.notifications.send(NotificationMessage("vendor", chat_id, "There is no active vendor work. Use /help for instructions.", f"vendor-no-active:{chat_id}"))

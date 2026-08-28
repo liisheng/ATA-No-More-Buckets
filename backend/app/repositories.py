@@ -79,8 +79,6 @@ class IncidentRepository(Protocol):
         self, target_type: str, target_id: str, telegram_chat_id: str
     ) -> None: ...
 
-    def add_vendor_telegram_user(self, vendor_id: str, telegram_user_id: str) -> None: ...
-
     def mark_telegram_delivery_ready(
         self, target_type: str, target_id: str, telegram_chat_id: str, started_at: datetime
     ) -> None: ...
@@ -228,12 +226,6 @@ class InMemoryIncidentRepository:
 
     def bind_telegram_chat(self, target_type: str, target_id: str, telegram_chat_id: str) -> None:
         self._bind_target(target_type, target_id, telegram_chat_id)
-
-    def add_vendor_telegram_user(self, vendor_id: str, telegram_user_id: str) -> None:
-        for vendor in self._vendors:
-            if vendor.vendor_id == vendor_id:
-                vendor.authorized_telegram_user_ids.add(telegram_user_id)
-                return
 
     def mark_telegram_delivery_ready(
         self, target_type: str, target_id: str, telegram_chat_id: str, started_at: datetime
@@ -431,6 +423,9 @@ class FirestoreIncidentRepository:
                 config = PropertyConfig.model_validate(payload)
                 properties[config.property_id] = config
             elif kind == "vendor":
+                # Older paired vendor documents contain this retired sender
+                # allowlist. The paired chat is now the authorization boundary.
+                payload.pop("authorized_telegram_user_ids", None)
                 vendors.append(Vendor.model_validate(payload))
             elif kind == "tenant":
                 tenant = TenantContact.model_validate(payload)
@@ -472,13 +467,6 @@ class FirestoreIncidentRepository:
     def bind_telegram_chat(self, target_type: str, target_id: str, telegram_chat_id: str) -> None:
         self.reference_data.document(f"{target_type}-{target_id}").set(
             {"telegram_chat_id": telegram_chat_id}, merge=True
-        )
-
-    def add_vendor_telegram_user(self, vendor_id: str, telegram_user_id: str) -> None:
-        from google.cloud.firestore_v1 import ArrayUnion
-
-        self.reference_data.document(f"vendor-{vendor_id}").set(
-            {"authorized_telegram_user_ids": ArrayUnion([telegram_user_id])}, merge=True
         )
 
     def mark_telegram_delivery_ready(

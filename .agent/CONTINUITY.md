@@ -16,6 +16,9 @@
 
 ## [DECISIONS]
 
+- 2026-08-29T01:05+08:00 [USER] Vendor Telegram authorization uses the paired group/chat plus the exact persisted vendor session, incident, and assigned vendor; sender allowlists are retired, and legacy Firestore allowlist fields are ignored during reference loading for migration-free compatibility.
+- 2026-08-29T01:05+08:00 [CODE] Completion submission marks a vendor session `COMPLETED` and reports success only when the returned incident has passed evidence validation and reached `PROVISIONALLY_RESOLVED`; retryable evidence failures preserve the active incident and return the session to `AWAITING_PHOTO` with sanitized blocking guidance.
+
 - 2026-08-28T21:10+08:00 [ASSUMPTION] Vendor intake should use persisted per-incident conversation state plus Telegram ForceReply prompts and slash-command fallbacks so it works in a privacy-enabled vendor group. Accepting within ten minutes stops the response SLA; Start job is withheld until confirmed quote and ETA are processed and no approval blocks work.
 
 - 2026-08-27T20:07:56+08:00 [USER] Preserve Vendor A's compressed 8/12-second demo fallback, but give the real Telegram Vendor B a 10-minute response window before pool-exhaustion escalation; Telegram messages must preserve intentional line and paragraph breaks.
@@ -72,6 +75,9 @@
 
 ## [DISCOVERIES]
 
+- 2026-08-29T00:45+08:00 [TOOL] The follow-up vendor build cannot yet be deployed: the live Firestore Vendor B reference is paired but has no `authorized_telegram_user_ids` field/value, while the new webhook strictly ignores every vendor message/callback whose sender is not allowlisted. The paired group is the intended vendor principal; sender-level allowlisting was not requested and has no backward-compatible bootstrap path.
+- 2026-08-29T00:45+08:00 [CODE] `submit_completion` still marks the vendor session `COMPLETED` and sends “evidence passed” after any `process_action` result, even when the evidence gate returns an `ESCALATED` incident with `last_evidence.passed == false`. This removes the retry path and sends a false success message. The requested sequential-session and failing-evidence wizard regressions are also absent from the integration suite.
+
 - 2026-08-28T22:44+08:00 [CODE] Guided vendor wizard release review found live-demo blockers despite green tests: `_vendor_session_for_chat` becomes ambiguous after multiple submitted historical sessions and the legacy Start callback does not carry a session id; ForceReply sets `selective=true` without mentioning or replying to a specific user; Decline/timeout do not terminalize the offered session; the `Release job` button invokes intake reset rather than releasing the assignment; legacy vendor callbacks can propagate `ValueError`; and completion photos are recorded by both webhook intake and wizard/completion handlers. Successful completion also lacks the promised vendor notification that tenant confirmation is pending.
 
 - 2026-08-28T20:33+08:00 [TOOL] Independent release verification found a timing race in `keeps vendor countdowns and outcomes attached to the matching vendor attempt`: the full 14-test Vitest run failed at the final Vendor B fallback assertion because its default one-second wait equals the one-second polling interval. The focused test passed three consecutive isolated runs in about three seconds each, indicating a nondeterministic test synchronization issue rather than evidence of a production countdown regression. Deployment remains withheld until Luna makes the test deterministic and the complete suite passes in one run.
@@ -115,6 +121,14 @@
 - 2026-08-25T23:41+08:00 [TOOL] Pub/Sub publishing is part of the cloud adapter, but end-to-end push delivery to `/api/events/pubsub` additionally requires a push subscription; workflow progression itself uses Cloud Tasks and does not depend on that subscription.
 
 ## [OUTCOMES]
+
+- 2026-08-29T01:15+08:00 [CODE] Added a focused Firestore repository regression using a legacy-shaped vendor reference payload with `authorized_telegram_user_ids`; loading succeeds and preserves the paired Telegram chat metadata.
+- 2026-08-29T01:15+08:00 [TOOL] Backend regression/full suite passes at 95 passed/1 skipped; Ruff, mypy, and `git diff --check` pass. Amended local commit is `f606749`.
+
+- 2026-08-29T01:05+08:00 [CODE] Implemented the two release-blocker corrections, removed sender-allowlist machinery, added paired-chat and sequential-session regressions plus failed-evidence coverage, and retained exactly one inbound vendor-image communication per completion photo.
+- 2026-08-29T01:05+08:00 [TOOL] Backend 94 passed/1 skipped, Ruff, mypy, frontend lint, two 14-test Vitest runs, production build, 3 Playwright tests, and `git diff --check` pass. Docker build was attempted but the local Docker Desktop Linux engine is unavailable.
+
+- 2026-08-29T00:45+08:00 [TOOL] Independent follow-up checks pass (backend 92 passed/1 skipped, Ruff, mypy, frontend lint, two 14-test Vitest runs, production build, 3 Playwright scenarios, and `git diff --check`), but production remains on `no-more-buckets-00014-bim`; deployment is withheld for live pairing compatibility and truthful completion-result handling.
 
 - 2026-08-28T22:44+08:00 [TOOL] Independent candidate checks pass (backend 91 passed/1 skipped, Ruff, mypy, frontend lint, two consecutive 14-test Vitest runs, production build, 3 Playwright scenarios, and `git diff --check`), but deployment is withheld pending the vendor group/session correctness follow-up identified in code review.
 

@@ -554,7 +554,7 @@ class IncidentService:
         if tenant or vendor:
             self.started_telegram_chats.add(telegram_chat_id)
 
-    def consume_pairing_code(self, code: str, telegram_chat_id: str, telegram_user_id: str | None = None) -> PairingCodeRecord:
+    def consume_pairing_code(self, code: str, telegram_chat_id: str) -> PairingCodeRecord:
         record = self.repository.consume_pairing_code(code, telegram_chat_id, datetime.now(UTC))
         if not record:
             raise ValueError("pairing code is invalid, expired, or already used")
@@ -570,9 +570,6 @@ class IncidentService:
             if not vendor_target:
                 raise ValueError("pairing target no longer exists")
             vendor_target.telegram_chat_id = telegram_chat_id
-            if telegram_user_id:
-                vendor_target.authorized_telegram_user_ids.add(telegram_user_id)
-                self.repository.add_vendor_telegram_user(vendor_target.vendor_id, telegram_user_id)
         self.repository.bind_telegram_chat(record.target_type, record.target_id, telegram_chat_id)
         self.mark_telegram_delivery_ready(telegram_chat_id)
         return record
@@ -1447,10 +1444,29 @@ class IncidentService:
             raise ValueError("Completion evidence is unavailable; please replace the photo.")
         invoice = Invoice(invoice_id=f"invoice_{incident.incident_id}_{event_id}", vendor_id=vendor.vendor_id, currency="SGD", total=session.final_price, line_items=[InvoiceLineItem(description=f"repair work: {session.completion_scope}", quantity=1, unit_price=session.final_price)])
         current = self.process_action(incident.incident_id, ActionRequest(action="completion", event_id=event_id, payload={"photo": photo.model_dump(), "invoice": invoice.model_dump()}))
-        session.submitted = True
-        session.stage = "COMPLETED"
-        self._save_vendor_session(session)
-        self._notify_vendor(current, vendor, "✅ Completion submitted\n\nThe evidence passed initial validation and has been sent to the tenant.\n\nWaiting for the tenant to confirm the repair is dry.", f"completion-submitted:{session.session_id}")
+        if (
+            current.status == IncidentStatus.PROVISIONALLY_RESOLVED
+            and current.last_evidence is not None
+            and current.last_evidence.passed
+        ):
+            session.submitted = True
+            session.stage = "COMPLETED"
+            self._save_vendor_session(session)
+            self._notify_vendor(current, vendor, "✅ Completion submitted\n\nThe evidence passed initial validation and has been sent to the tenant.\n\nWaiting for the tenant to confirm the repair is dry.", f"completion-submitted:{session.session_id}")
+        else:
+            reasons = current.last_evidence.blocking_reasons if current.last_evidence else ["completion evidence could not be validated"]
+            safe_reasons = "\n".join(f"• {reason}" for reason in reasons)
+            session.submitted = False
+            session.completion_photo_ids = []
+            session.final_price_confirmed = False
+            if current.status == IncidentStatus.ESCALATED:
+                session.stage = "AWAITING_FINAL_APPROVAL" if current.approval and current.approval.status == "pending" else "SUBMITTED"
+                next_action = "Manager review is required before another completion submission can succeed."
+            else:
+                session.stage = "AWAITING_PHOTO"
+                next_action = "Attach one corrected after-photo to retry completion evidence. Your work summary and final price are still saved."
+            self._save_vendor_session(session)
+            self._notify_vendor(current, vendor, f"❌ Completion was not accepted.\n\nBlocking reason(s):\n{safe_reasons}\n\n{next_action}", f"completion-blocked:{session.session_id}")
         return current
 
     def change_final_price(self, session: VendorSession, amount: float) -> VendorSession:
@@ -1908,9 +1924,6 @@ class IncidentService:
                 "VENDOR_CHECK_IN_IMPLIED_BY_COMPLETION",
                 request.event_id,
             )
-        self._transition(
-            incident, IncidentStatus.VERIFYING, "COMPLETION_EVIDENCE_RECEIVED", request.event_id
-        )
         evidence = CompletionEvidence.model_validate(request.payload)
         if evidence.photo:
             validate_media_asset(evidence.photo)
@@ -1976,13 +1989,16 @@ class IncidentService:
             metadata={"passed": assessment.passed, "blocking_reasons": assessment.blocking_reasons},
         )
         if not assessment.passed:
-            self._transition(incident, IncidentStatus.ESCALATED, "EVIDENCE_GATE_BLOCKED_CLOSURE")
-            self._notify(
+            self._timeline(
                 incident,
-                "We need corrected completion evidence before this incident can close.",
-                "evidence-blocked",
+                "completion_retry_available",
+                "EVIDENCE_GATE_BLOCKED_CLOSURE",
+                event_id=request.event_id,
             )
             return
+        self._transition(
+            incident, IncidentStatus.VERIFYING, "COMPLETION_EVIDENCE_RECEIVED", request.event_id
+        )
         if incident.work_order is not None:
             incident.work_order.status = "completed"
         incident.warranty_expires_at = self.clock.now() + (
