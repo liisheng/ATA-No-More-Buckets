@@ -570,6 +570,49 @@ def test_premature_complete_returns_current_vendor_step_help(monkeypatch, servic
     assert "Current step: AWAITING_PRICE" in fake.messages[-1].text
 
 
+def test_cancel_after_quote_submission_returns_current_vendor_step_help(monkeypatch, service):
+    client, fake = configure(monkeypatch, service)
+    start_report(client, 2480)
+    incident = submit_draft(client, service, 2483)
+    incident = move_vendor_a_timeout(client, service)
+    post(client, {"update_id": 2484, "callback_query": {"id": "accept-2484", "data": f"vendor:{incident.incident_id}:accept", "message": {"chat": {"id": 7202}}}})
+    session = service.repository.list_vendor_sessions("7202")[0]
+    post(client, {"update_id": 2485, "message": {"chat": {"id": 7202}, "text": "220"}})
+    post(client, {"update_id": 2486, "callback_query": {"id": "pc-2486", "data": f"vs:{session.session_id}:pc", "message": {"chat": {"id": 7202}}}})
+    post(client, {"update_id": 2487, "message": {"chat": {"id": 7202}, "text": "20"}})
+    post(client, {"update_id": 2488, "callback_query": {"id": "ec-2488", "data": f"vs:{session.session_id}:ec", "message": {"chat": {"id": 7202}}}})
+    post(client, {"update_id": 2489, "callback_query": {"id": "su-2489", "data": f"vs:{session.session_id}:su", "message": {"chat": {"id": 7202}}}})
+    assert service.repository.get_vendor_session(session.session_id).stage == "SUBMITTED"
+
+    response = post(client, {"update_id": 2490, "message": {"chat": {"id": 7202}, "text": "/cancel"}})
+    assert response.status_code == 200
+    assert response.json()["kind"] == "vendor_step_help"
+    assert "Current step: SUBMITTED" in fake.messages[-1].text
+    assert service.repository.get_vendor_session(session.session_id).stage == "SUBMITTED"
+
+
+def test_cancel_offered_vendor_session_is_rejected_and_accept_remains_available(monkeypatch, service):
+    client, fake = configure(monkeypatch, service)
+    start_report(client, 2495)
+    incident = submit_draft(client, service, 2498)
+    incident = move_vendor_a_timeout(client, service)
+    session = service.repository.list_vendor_sessions("7202")[0]
+    assert session.stage == "OFFERED"
+
+    cancelled = post(client, {"update_id": 2499, "message": {"chat": {"id": 7202}, "text": "/cancel"}})
+    assert cancelled.status_code == 200
+    assert cancelled.json()["kind"] == "vendor_step_help"
+    assert "Current step: OFFERED" in fake.messages[-1].text
+    assert service.repository.get_vendor_session(session.session_id).stage == "OFFERED"
+    assert service.repository.get_vendor_session(session.session_id).cancelled is False
+
+    accepted = post(client, {"update_id": 2500, "callback_query": {"id": "accept-2500", "data": f"vendor:{incident.incident_id}:accept", "message": {"chat": {"id": 7202}}}})
+    assert accepted.status_code == 200
+    assert accepted.json()["kind"] == "vendor_callback"
+    assert service.repository.get_vendor_session(session.session_id).stage == "AWAITING_PRICE"
+    assert service.get_incident(incident.incident_id).assigned_vendor_id == "vendor-b"
+
+
 def test_invalid_price_eta_and_photo_keep_the_current_step(monkeypatch, service):
     client, _ = configure(monkeypatch, service)
     start_report(client, 2500)

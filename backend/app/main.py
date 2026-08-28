@@ -1209,7 +1209,11 @@ def telegram_webhook(
             service._notify_vendor(vendor_incident, vendor, _vendor_help(session), f"vendor-{command[1:]}:{session.session_id}")
             return {"status": "processed", "kind": f"vendor_{command[1:]}"}
         if command == "/cancel":
-            cancelled_session = service.cancel_vendor_session(session)
+            try:
+                cancelled_session = service.cancel_vendor_session(session)
+            except ValueError:
+                service._notify_vendor(vendor_incident, vendor, _vendor_help(session), f"vendor-cancel-invalid:{session.session_id}:{session.revision}")
+                return {"status": "processed", "kind": "vendor_step_help"}
             message = "Intake reset. The job remains reserved. Send one SGD quote to continue." if cancelled_session.stage == "AWAITING_PRICE" else "Completion draft cancelled. Send /complete when the repair is finished." if cancelled_session.stage == "SUBMITTED" else "Offer cancelled."
             service._notify_vendor(vendor_incident, vendor, message, f"vendor-cancel:{session.session_id}")
             return {"status": "processed", "kind": "vendor_cancelled"}

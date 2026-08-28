@@ -1334,7 +1334,9 @@ class IncidentService:
             return session
         if session.submitted:
             raise ValueError("An accepted job cannot be cancelled with /cancel.")
-        if session.stage != "OFFERED" and incident.assigned_vendor_id == vendor.vendor_id and incident.status.value == "SCHEDULED":
+        if session.stage == "OFFERED":
+            raise ValueError("This offer cannot be cancelled. Tap Accept job or Decline job.")
+        if incident.assigned_vendor_id == vendor.vendor_id and incident.status.value == "SCHEDULED":
             session.draft_price = None
             session.draft_eta = None
             session.price_confirmed = False
