@@ -60,6 +60,9 @@ class Settings(BaseSettings):
     routine_vendor_timeout_seconds: int = Field(
         default=12, validation_alias="ROUTINE_VENDOR_TIMEOUT_SECONDS"
     )
+    human_vendor_timeout_seconds: int = Field(
+        default=600, validation_alias="HUMAN_VENDOR_TIMEOUT_SECONDS"
+    )
     tenant_confirmation_delay_seconds: int = Field(
         default=15, validation_alias="TENANT_CONFIRMATION_DELAY_SECONDS"
     )
@@ -90,7 +93,7 @@ class Settings(BaseSettings):
 
     @field_validator("spending_limit_default", "currency")
     @classmethod
-    def require_mvp_defaults(cls, value):
+    def require_mvp_defaults(cls, value: float | str) -> float | str:
         # These values are the MVP defaults. Deployments may still override them
         # explicitly, but an empty or malformed configuration must not weaken the cap.
         if value == "" or value is None:

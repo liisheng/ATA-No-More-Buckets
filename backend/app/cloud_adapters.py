@@ -28,7 +28,11 @@ class GoogleCloudStorageMediaStore:
     def put(self, asset: MediaAsset) -> str:
         safe_filename = asset.filename.replace("\\", "/").rsplit("/", 1)[-1] or "media.bin"
         blob = self.bucket.blob(f"incidents/{asset.asset_id}/{safe_filename}")
-        blob.metadata = {"source": asset.source, "asset_id": asset.asset_id}
+        blob.metadata = {
+            "source": asset.source,
+            "asset_id": asset.asset_id,
+            "duration_seconds": str(asset.duration_seconds) if asset.duration_seconds is not None else "",
+        }
         if asset.content_base64:
             blob.upload_from_string(
                 base64.b64decode(asset.content_base64), content_type=asset.mime_type
@@ -46,6 +50,7 @@ class GoogleCloudStorageMediaStore:
         raw = blob.download_as_bytes()
         filename = blob.name.rsplit("/", 1)[-1]
         source = (blob.metadata or {}).get("source", "system")
+        duration_value = (blob.metadata or {}).get("duration_seconds")
         if source not in {"tenant", "vendor", "system"}:
             source = "system"
         return MediaAsset(
@@ -54,9 +59,10 @@ class GoogleCloudStorageMediaStore:
             mime_type=blob.content_type or "application/octet-stream",
             size_bytes=len(raw),
             sha256=hashlib.sha256(raw).hexdigest(),
+            duration_seconds=int(duration_value) if duration_value else None,
             content_base64=base64.b64encode(raw).decode(),
             storage_uri=f"gs://{self.bucket.name}/{blob.name}",
-            source=source,  # type: ignore[arg-type]
+            source=source,
         )
 
 
@@ -64,7 +70,7 @@ class GoogleSecretManagerProvider:
     provider_name = "secret_manager"
 
     def __init__(self, settings: Settings) -> None:
-        from google.cloud import secretmanager  # type: ignore[attr-defined]
+        from google.cloud import secretmanager
 
         if not settings.google_cloud_project:
             raise ValueError("GOOGLE_CLOUD_PROJECT is required for Secret Manager")
@@ -135,7 +141,7 @@ class GoogleCloudTasksQueue:
         payload: dict[str, Any],
         delay_seconds: int,
     ) -> str:
-        from google.protobuf import timestamp_pb2  # type: ignore[import-untyped]
+        from google.protobuf import timestamp_pb2
 
         parent = self.client.queue_path(self.project, self.location, self.queue)
         timestamp = timestamp_pb2.Timestamp()
@@ -162,4 +168,9 @@ class GoogleCloudTasksQueue:
                 "service_account_email": self.settings.cloud_tasks_invoker_service_account,
                 "audience": self.settings.public_base_url,
             }
-        return self.client.create_task(parent=parent, task=task).name  # type: ignore[arg-type]
+        try:
+            return self.client.create_task(parent=parent, task=task).name  # type: ignore[arg-type]
+        except Exception as exc:
+            if exc.__class__.__name__ in {"AlreadyExists", "Conflict"}:
+                return f"{parent}/tasks/{task_id}"
+            raise

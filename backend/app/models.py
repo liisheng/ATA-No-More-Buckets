@@ -47,6 +47,7 @@ class MediaAsset(StrictModel):
     mime_type: str
     size_bytes: int = Field(ge=0)
     sha256: str
+    duration_seconds: int | None = Field(default=None, ge=0)
     content_base64: str | None = None
     storage_uri: str | None = None
     source: Literal["tenant", "vendor", "system"] = "tenant"
@@ -86,7 +87,9 @@ class ObservableFacts(StrictModel):
     water_source: str | None = Field(default=None, max_length=200)
     electrical_hazard: bool = False
     structural_hazard: bool = False
+    gas_hazard: bool = False
     occupant_danger: bool = False
+    uncontrolled_flooding: bool = False
     access_available: bool = True
     estimated_cost: float | None = Field(default=None, ge=0)
     affected_rooms: list[str] = Field(default_factory=list, max_length=10)
@@ -117,7 +120,7 @@ class CommunicationRecord(StrictModel):
     recipient_id: str
     channel: str = Field(min_length=1, max_length=80)
     direction: Literal["inbound", "outbound"]
-    message_type: Literal["text", "image", "audio", "button", "invoice", "system"]
+    message_type: Literal["text", "image", "video", "audio", "button", "invoice", "system"]
     text: str = Field(default="", max_length=4000)
     media_ids: list[str] = Field(default_factory=list, max_length=20)
     provider_message_id: str | None = Field(default=None, max_length=200)
@@ -132,6 +135,7 @@ class MediaDescriptor(StrictModel):
     filename: str
     mime_type: str
     size_bytes: int = Field(ge=0)
+    duration_seconds: int | None = Field(default=None, ge=0)
     source: Literal["tenant", "vendor", "system"]
     url: str
 
@@ -161,6 +165,8 @@ class Vendor(StrictModel):
     distance_km: float = Field(default=5, ge=0)
     demo_behavior: Literal["accept", "decline", "timeout"] = "accept"
     telegram_chat_id: str | None = None
+    telegram_started_at: datetime | None = None
+    delivery_ready: bool = False
 
 
 class TenantContact(StrictModel):
@@ -168,6 +174,8 @@ class TenantContact(StrictModel):
     property_id: str
     display_name: str
     telegram_chat_id: str | None = None
+    telegram_started_at: datetime | None = None
+    delivery_ready: bool = False
 
 
 class PairingCodeRecord(StrictModel):
@@ -193,6 +201,16 @@ class PairingCodeResponse(StrictModel):
     expires_at: datetime
 
 
+class TelegramDraftItem(StrictModel):
+    """One ordered, idempotent message contribution to a Telegram draft."""
+
+    item_key: str = Field(min_length=1, max_length=240)
+    kind: Literal["text", "image", "video", "audio"]
+    text: str = Field(default="", max_length=4000)
+    media_id: str | None = None
+    communication_id: str
+
+
 class TelegramDraft(StrictModel):
     """A persisted, expiring tenant report assembled from Telegram updates."""
 
@@ -202,11 +220,14 @@ class TelegramDraft(StrictModel):
     telegram_chat_id: str
     text_parts: list[str] = Field(default_factory=list, max_length=20)
     media: list[MediaAsset] = Field(default_factory=list, max_length=10)
+    items: list[TelegramDraftItem] = Field(default_factory=list, max_length=20)
+    item_keys: list[str] = Field(default_factory=list, max_length=20)
     communication_ids: list[str] = Field(default_factory=list, max_length=20)
     submitted_incident_id: str | None = None
     created_at: datetime
     updated_at: datetime
     expires_at: datetime
+    revision: int = Field(default=0, ge=0)
 
 
 class VendorAttempt(StrictModel):
@@ -221,10 +242,11 @@ class VendorAttempt(StrictModel):
 class WorkOrder(StrictModel):
     work_order_id: str
     incident_id: str
+    property_name: str | None = None
     scope: str
     currency: str
     spending_limit: float = Field(ge=0)
-    estimated_cost: float = Field(ge=0)
+    estimated_cost: float | None = Field(default=None, ge=0)
     authorized_amount: float = Field(default=0, ge=0)
     status: Literal["bounded", "approval_required", "dispatched", "completed"] = "bounded"
     approved: bool = False
@@ -329,6 +351,13 @@ class ActionRequest(StrictModel):
     ]
     payload: dict[str, Any] = Field(default_factory=dict)
     event_id: str = Field(min_length=1, max_length=160)
+
+
+class TaskEvent(StrictModel):
+    task_id: str = Field(min_length=1, max_length=200)
+    incident_id: str = Field(min_length=1, max_length=100)
+    task_type: Literal["tenant_confirmation", "vendor_timeout", "vendor_retry"]
+    payload: dict[str, Any] = Field(default_factory=dict)
 
 
 class RuntimeMetadata(StrictModel):

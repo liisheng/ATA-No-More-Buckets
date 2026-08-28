@@ -8,7 +8,7 @@ import re
 import wave
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 from uuid import uuid4
 
 import httpx
@@ -25,6 +25,18 @@ from .models import (
     Vendor,
     WorkOrder,
 )
+
+
+def sanitize_contact_text(value: str | None, max_length: int = 4000) -> str:
+    """Bound untrusted contact text while preserving intentional line breaks."""
+    if not value:
+        return ""
+    normalized = value.replace("\r\n", "\n").replace("\r", "\n")
+    lines = []
+    for line in normalized.split("\n"):
+        safe_line = "".join(char if char.isprintable() else " " for char in line)
+        lines.append(" ".join(safe_line.split()))
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()[:max_length]
 
 
 def gemini_response_schema(model: type[BaseModel]) -> dict[str, Any]:
@@ -64,7 +76,7 @@ def gemini_response_schema(model: type[BaseModel]) -> dict[str, Any]:
                 result[key] = convert(value)
         return result
 
-    return convert(raw)
+    return cast(dict[str, Any], convert(raw))
 
 
 class Clock(Protocol):
@@ -100,13 +112,21 @@ class FactExtractor(Protocol):
 
 
 def _safe_untrusted_text(value: str | None, max_length: int = 4000) -> str:
-    if not value:
-        return ""
-    return " ".join("".join(ch for ch in value if ch.isprintable()).split()).strip()[:max_length]
+    return sanitize_contact_text(value, max_length)
 
 
 def validate_media_asset(asset: MediaAsset, max_bytes: int = 10_000_000) -> MediaAsset:
-    allowed = {"image/jpeg", "image/png", "image/webp", "audio/mpeg", "audio/wav", "audio/ogg"}
+    allowed = {
+        "image/jpeg",
+        "image/png",
+        "image/webp",
+        "video/mp4",
+        "video/quicktime",
+        "video/webm",
+        "audio/mpeg",
+        "audio/wav",
+        "audio/ogg",
+    }
     if asset.mime_type.lower() not in allowed:
         raise ValueError("unsupported media type")
     if asset.size_bytes > max_bytes:
@@ -148,7 +168,7 @@ class DeterministicFactExtractor:
         # Synthetic default stays inside the S$250 autonomous cap; explicit
         # amounts from untrusted text are still parsed as observable estimates
         # and then checked by deterministic policy.
-        estimated_cost = float(numbers[-1]) if numbers else 180.0
+        estimated_cost = float(numbers[-1]) if numbers else None
         return ObservableFacts(
             issue_type=IssueType(issue_type),
             severity=Severity(severity),
@@ -163,7 +183,11 @@ class DeterministicFactExtractor:
             structural_hazard=any(
                 word in lower for word in ("ceiling sag", "collapse", "structural")
             ),
+            gas_hazard=any(word in lower for word in ("gas leak", "smell gas", "gas smell")),
             occupant_danger=any(word in lower for word in ("danger", "unsafe", "injured")),
+            uncontrolled_flooding=any(
+                word in lower for word in ("uncontrolled flooding", "water everywhere", "burst pipe")
+            ),
             access_available=not any(word in lower for word in ("no access", "locked out")),
             estimated_cost=estimated_cost,
             affected_rooms=[
@@ -366,10 +390,17 @@ class TelegramBotAdapter:
         self._sent.add(message.action_key)
         return f"telegram:{body.get('result', {}).get('message_id', message.action_key)}"
 
-    def answer_callback(self, callback_query_id: str) -> None:
+    def answer_callback(
+        self, callback_query_id: str, text: str | None = None, show_alert: bool = False
+    ) -> None:
+        payload: dict[str, Any] = {"callback_query_id": callback_query_id}
+        if text:
+            payload["text"] = text
+        if show_alert:
+            payload["show_alert"] = True
         response = httpx.post(
             f"{self._base_url}/answerCallbackQuery",
-            json={"callback_query_id": callback_query_id},
+            json=payload,
             timeout=10,
         )
         response.raise_for_status()
@@ -402,7 +433,13 @@ class TelegramBotAdapter:
         return result
 
     def download_media(
-        self, file_id: str, *, mime_type: str, filename: str, source: str = "tenant"
+        self,
+        file_id: str,
+        *,
+        mime_type: str,
+        filename: str,
+        source: str = "tenant",
+        duration_seconds: int | None = None,
     ) -> MediaAsset:
         metadata = httpx.get(f"{self._base_url}/getFile", params={"file_id": file_id}, timeout=10)
         metadata.raise_for_status()
@@ -417,11 +454,12 @@ class TelegramBotAdapter:
         if len(raw) > 10_000_000:
             raise ValueError("Telegram media exceeds the 10 MB application limit")
         return MediaAsset(
-            asset_id=f"telegram-{uuid4().hex}",
+            asset_id=f"telegram-{hashlib.sha256(file_id.encode()).hexdigest()[:24]}",
             filename=filename,
             mime_type=mime_type,
             size_bytes=len(raw),
             sha256=hashlib.sha256(raw).hexdigest(),
+            duration_seconds=duration_seconds,
             content_base64=base64.b64encode(raw).decode(),
             source=source,  # type: ignore[arg-type]
         )
@@ -484,6 +522,8 @@ class VendorAdapter(Protocol):
         self, work_order: WorkOrder, vendor: Vendor, idempotency_key: str
     ) -> VendorDispatchResult: ...
 
+    def is_human_vendor(self, vendor: Vendor) -> bool: ...
+
 
 class LocalDemoVendorAdapter:
     provider_name = "local_vendor_network"
@@ -492,6 +532,9 @@ class LocalDemoVendorAdapter:
         self.vendor_a_behavior = vendor_a_behavior
         self.calls: list[tuple[str, str]] = []
         self._seen: dict[str, VendorDispatchResult] = {}
+
+    def is_human_vendor(self, vendor: Vendor) -> bool:
+        return False
 
     def dispatch(
         self, work_order: WorkOrder, vendor: Vendor, idempotency_key: str
@@ -520,6 +563,9 @@ class TelegramVendorAdapter:
     def __init__(self, messaging: MessagingPort) -> None:
         self.messaging = messaging
 
+    def is_human_vendor(self, vendor: Vendor) -> bool:
+        return True
+
     def dispatch(
         self, work_order: WorkOrder, vendor: Vendor, idempotency_key: str
     ) -> VendorDispatchResult:
@@ -544,9 +590,14 @@ class TelegramVendorAdapter:
                 work_order.incident_id,
                 vendor.telegram_chat_id,
                 (
-                    f"New bounded plumbing work order {work_order.work_order_id}. {work_order.scope} "
-                    f"Authority: {work_order.currency} {work_order.authorized_amount:.2f}. "
-                    "Tap Accept or Decline. After acceptance, reply ETA <minutes> and PRICE <amount>."
+                    "🔧 New bounded work order\n\n"
+                    f"Work order: {work_order.work_order_id}\n"
+                    f"Property/unit: {work_order.property_name or 'the reported unit'}\n"
+                    f"Scope: {work_order.scope}\n"
+                    f"Authority: {work_order.currency} {work_order.authorized_amount:.2f}\n\n"
+                    "Tap Accept or Decline.\n\n"
+                    "After acceptance, reply:\n"
+                    "PRICE <amount> ETA <minutes>"
                 ),
                 idempotency_key,
                 reply_markup=keyboard,
@@ -557,9 +608,14 @@ class TelegramVendorAdapter:
             outcome,
             recipient_id=vendor.telegram_chat_id,
             text=(
-                f"New bounded plumbing work order {work_order.work_order_id}. {work_order.scope} "
-                f"Authority: {work_order.currency} {work_order.authorized_amount:.2f}. "
-                "Tap Accept or Decline. After acceptance, reply ETA <minutes> and PRICE <amount>."
+                "🔧 New bounded work order\n\n"
+                f"Work order: {work_order.work_order_id}\n"
+                f"Property/unit: {work_order.property_name or 'the reported unit'}\n"
+                f"Scope: {work_order.scope}\n"
+                f"Authority: {work_order.currency} {work_order.authorized_amount:.2f}\n\n"
+                "Tap Accept or Decline.\n\n"
+                "After acceptance, reply:\n"
+                "PRICE <amount> ETA <minutes>"
             ),
             message_type="button",
         )
@@ -581,6 +637,9 @@ class DemoTelegramVendorAdapter:
         self.vendor_a_behavior = vendor_a_behavior
         self._telegram = TelegramVendorAdapter(messaging)
         self._seen: dict[str, VendorDispatchResult] = {}
+
+    def is_human_vendor(self, vendor: Vendor) -> bool:
+        return vendor.vendor_id != "vendor-a"
 
     def dispatch(
         self, work_order: WorkOrder, vendor: Vendor, idempotency_key: str

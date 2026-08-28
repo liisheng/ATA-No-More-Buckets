@@ -3,7 +3,7 @@ from __future__ import annotations
 import builtins
 from copy import deepcopy
 from datetime import datetime
-from typing import Protocol
+from typing import Any, Protocol
 
 from .models import (
     CommunicationRecord,
@@ -35,7 +35,11 @@ class IncidentRepository(Protocol):
 
     def list_drafts(self, telegram_chat_id: str) -> builtins.list[TelegramDraft]: ...
 
+    def list_all_drafts(self) -> builtins.list[TelegramDraft]: ...
+
     def delete_draft(self, draft_id: str) -> None: ...
+
+    def delete_communication(self, communication_id: str) -> None: ...
 
     def move_communications(self, source_incident_id: str, target_incident_id: str) -> None: ...
 
@@ -66,6 +70,10 @@ class IncidentRepository(Protocol):
         self, target_type: str, target_id: str, telegram_chat_id: str
     ) -> None: ...
 
+    def mark_telegram_delivery_ready(
+        self, target_type: str, target_id: str, telegram_chat_id: str, started_at: datetime
+    ) -> None: ...
+
 
 class InMemoryIncidentRepository:
     provider_name = "memory"
@@ -77,6 +85,9 @@ class InMemoryIncidentRepository:
         self._pairing_codes: dict[str, PairingCodeRecord] = {}
         self._communications: dict[str, CommunicationRecord] = {}
         self._drafts: dict[str, TelegramDraft] = {}
+        self._properties: dict[str, PropertyConfig] = {}
+        self._vendors: builtins.list[Vendor] = []
+        self._tenants: dict[str, TenantContact] = {}
 
     def save(self, incident: Incident) -> None:
         self._incidents[incident.incident_id] = deepcopy(incident)
@@ -120,8 +131,18 @@ class InMemoryIncidentRepository:
             reverse=True,
         )
 
+    def list_all_drafts(self) -> builtins.list[TelegramDraft]:
+        return sorted(
+            [deepcopy(draft) for draft in self._drafts.values()],
+            key=lambda draft: draft.updated_at,
+            reverse=True,
+        )
+
     def delete_draft(self, draft_id: str) -> None:
         self._drafts.pop(draft_id, None)
+
+    def delete_communication(self, communication_id: str) -> None:
+        self._communications.pop(communication_id, None)
 
     def move_communications(self, source_incident_id: str, target_incident_id: str) -> None:
         for record in self._communications.values():
@@ -147,12 +168,19 @@ class InMemoryIncidentRepository:
         vendors: builtins.list[Vendor],
         tenants: dict[str, TenantContact],
     ) -> None:
-        return None
+        if not self._properties:
+            self._properties = deepcopy(properties)
+        if not self._vendors:
+            self._vendors = deepcopy(vendors)
+        if not self._tenants:
+            self._tenants = deepcopy(tenants)
 
     def load_reference_data(
         self,
     ) -> tuple[dict[str, PropertyConfig], builtins.list[Vendor], dict[str, TenantContact]] | None:
-        return None
+        if not self._properties or not self._vendors or not self._tenants:
+            return None
+        return deepcopy(self._properties), deepcopy(self._vendors), deepcopy(self._tenants)
 
     def create_pairing_code(self, record: PairingCodeRecord) -> None:
         if record.code in self._pairing_codes:
@@ -170,7 +198,28 @@ class InMemoryIncidentRepository:
         return deepcopy(record)
 
     def bind_telegram_chat(self, target_type: str, target_id: str, telegram_chat_id: str) -> None:
-        return None
+        self._bind_target(target_type, target_id, telegram_chat_id)
+
+    def mark_telegram_delivery_ready(
+        self, target_type: str, target_id: str, telegram_chat_id: str, started_at: datetime
+    ) -> None:
+        self._bind_target(target_type, target_id, telegram_chat_id)
+        if target_type == "tenant" and target_id in self._tenants:
+            self._tenants[target_id].telegram_started_at = started_at
+            self._tenants[target_id].delivery_ready = True
+        if target_type == "vendor":
+            for vendor in self._vendors:
+                if vendor.vendor_id == target_id:
+                    vendor.telegram_started_at = started_at
+                    vendor.delivery_ready = True
+
+    def _bind_target(self, target_type: str, target_id: str, telegram_chat_id: str) -> None:
+        if target_type == "tenant" and target_id in self._tenants:
+            self._tenants[target_id].telegram_chat_id = telegram_chat_id
+        if target_type == "vendor":
+            for vendor in self._vendors:
+                if vendor.vendor_id == target_id:
+                    vendor.telegram_chat_id = telegram_chat_id
 
 
 class FirestoreIncidentRepository:
@@ -237,8 +286,18 @@ class FirestoreIncidentRepository:
                 drafts.append(TelegramDraft.model_validate(value))
         return sorted(drafts, key=lambda draft: draft.updated_at, reverse=True)
 
+    def list_all_drafts(self) -> builtins.list[TelegramDraft]:
+        drafts = [
+            TelegramDraft.model_validate(snapshot.to_dict() or {})
+            for snapshot in self.drafts.stream()
+        ]
+        return sorted(drafts, key=lambda draft: draft.updated_at, reverse=True)
+
     def delete_draft(self, draft_id: str) -> None:
         self.drafts.document(draft_id).delete()
+
+    def delete_communication(self, communication_id: str) -> None:
+        self.communications.document(communication_id).delete()
 
     def move_communications(self, source_incident_id: str, target_incident_id: str) -> None:
         for snapshot in self.communications.stream():
@@ -335,8 +394,8 @@ class FirestoreIncidentRepository:
         ref = self.client.collection("pairing_codes").document(code)
         transaction = self.client.transaction()
 
-        @self._firestore.transactional
-        def consume(transaction):
+        @self._firestore.transactional  # type: ignore[misc]
+        def consume(transaction: Any) -> PairingCodeRecord | None:
             snapshot = ref.get(transaction=transaction)
             if not snapshot.exists:
                 return None
@@ -351,9 +410,22 @@ class FirestoreIncidentRepository:
             record.telegram_chat_id = telegram_chat_id
             return record
 
-        return consume(transaction)
+        result: PairingCodeRecord | None = consume(transaction)
+        return result
 
     def bind_telegram_chat(self, target_type: str, target_id: str, telegram_chat_id: str) -> None:
         self.reference_data.document(f"{target_type}-{target_id}").set(
             {"telegram_chat_id": telegram_chat_id}, merge=True
+        )
+
+    def mark_telegram_delivery_ready(
+        self, target_type: str, target_id: str, telegram_chat_id: str, started_at: datetime
+    ) -> None:
+        self.reference_data.document(f"{target_type}-{target_id}").set(
+            {
+                "telegram_chat_id": telegram_chat_id,
+                "telegram_started_at": started_at,
+                "delivery_ready": True,
+            },
+            merge=True,
         )

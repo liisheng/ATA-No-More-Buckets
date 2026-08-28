@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Literal
 from uuid import uuid4
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -29,6 +29,7 @@ from .adapters import (
     MediaStore,
     MessagingPort,
     NotificationMessage,
+    SystemClock,
     TaskQueue,
     TelegramBotAdapter,
     TelegramVendorAdapter,
@@ -54,12 +55,15 @@ from .models import (
     Incident,
     Invoice,
     InvoiceLineItem,
+    MediaAsset,
     MediaDescriptor,
     PairingCodeRequest,
     PairingCodeResponse,
     ReportInput,
+    TaskEvent,
     TelegramDraft,
     TenantContact,
+    Vendor,
 )
 from .repositories import FirestoreIncidentRepository, InMemoryIncidentRepository
 from .service import IncidentNotFound, IncidentService
@@ -151,7 +155,7 @@ def create_service(settings: Settings | None = None) -> IncidentService:
         properties=properties,
         vendors=vendors,
         tenants=tenants,
-        clock=DemoClock() if settings.demo_mode else None,
+        clock=DemoClock() if settings.demo_mode and not cloud and not settings.k_service else SystemClock(),
         agent=agent,
     )
     service.resume_pending_workflows()
@@ -175,22 +179,44 @@ def _require_demo_api() -> None:
         raise HTTPException(status_code=404, detail="demo API is disabled")
 
 
+def _require_local_replay_api() -> None:
+    _require_demo_api()
+    if service.live_cloud or service.notifications.provider_name == "telegram":
+        raise HTTPException(status_code=404, detail="deterministic replay is disabled in live mode")
+
+
+def _require_local_draft_api() -> None:
+    _require_demo_api()
+    if service.live_cloud:
+        raise HTTPException(status_code=404, detail="draft inspection is disabled in live mode")
+
+
 def _tenant_for_chat(chat_id: str) -> TenantContact | None:
     return next(
         (tenant for tenant in service.tenants.values() if tenant.telegram_chat_id == chat_id), None
     )
 
 
-def _vendor_for_chat(chat_id: str):
+def _vendor_for_chat(chat_id: str) -> Vendor | None:
     return next((vendor for vendor in service.vendors if vendor.telegram_chat_id == chat_id), None)
 
 
 def _active_vendor_incident(vendor_id: str) -> Incident | None:
+    active_statuses = {
+        "DISPATCHING",
+        "SCHEDULED",
+        "IN_PROGRESS",
+        "VERIFYING",
+        "ESCALATED",
+    }
     matches = [
         incident
         for incident in service.list_incidents()
-        if incident.assigned_vendor_id == vendor_id
-        or any(attempt.vendor_id == vendor_id for attempt in incident.vendor_attempts)
+        if incident.status.value in active_statuses
+        and (
+            incident.assigned_vendor_id == vendor_id
+            or any(attempt.vendor_id == vendor_id for attempt in incident.vendor_attempts)
+        )
     ]
     return max(matches, key=lambda incident: incident.updated_at) if matches else None
 
@@ -230,6 +256,37 @@ def _telegram_media(message: dict, source: str = "tenant") -> list:
                 mime_type="audio/ogg",
                 filename="telegram-voice.ogg",
                 source=source,
+                duration_seconds=(
+                    int(voice["duration"]) if isinstance(voice.get("duration"), int) else None
+                ),
+            )
+        )
+    video = message.get("video")
+    if isinstance(video, dict) and isinstance(video.get("file_id"), str):
+        media.append(
+            service.notifications.download_media(
+                video["file_id"],
+                mime_type=str(video.get("mime_type") or "video/mp4"),
+                filename="telegram-video.mp4",
+                source=source,
+                duration_seconds=(
+                    int(video["duration"]) if isinstance(video.get("duration"), int) else None
+                ),
+            )
+        )
+    video_note = message.get("video_note")
+    if isinstance(video_note, dict) and isinstance(video_note.get("file_id"), str):
+        media.append(
+            service.notifications.download_media(
+                video_note["file_id"],
+                mime_type="video/mp4",
+                filename="telegram-video-note.mp4",
+                source=source,
+                duration_seconds=(
+                    int(video_note["duration"])
+                    if isinstance(video_note.get("duration"), int)
+                    else None
+                ),
             )
         )
     return media
@@ -239,12 +296,45 @@ def _draft_markup(draft: TelegramDraft) -> dict:
     return {
         "inline_keyboard": [
             [
-                {"text": "Submit report", "callback_data": f"draft:{draft.draft_id}:submit"},
-                {"text": "Add more", "callback_data": f"draft:{draft.draft_id}:add"},
+                {"text": "✅ Submit report", "callback_data": f"draft:{draft.draft_id}:submit"},
+                {"text": "➕ Add / edit items", "callback_data": f"draft:{draft.draft_id}:add"},
             ],
-            [{"text": "Cancel", "callback_data": f"draft:{draft.draft_id}:cancel"}],
+            [
+                {"text": "↩️ Undo last", "callback_data": f"draft:{draft.draft_id}:undo"},
+                {"text": "🗑 Cancel", "callback_data": f"draft:{draft.draft_id}:cancel"},
+            ],
         ]
     }
+
+
+def _draft_item_key(update_id: int, message: dict) -> str:
+    """Build a stable key from Telegram's delivery identifiers."""
+
+    message_id = message.get("message_id")
+    media_group_id = message.get("media_group_id")
+    file_ids: list[str] = []
+    for field in ("photo", "video", "voice", "video_note"):
+        value = message.get(field)
+        if field == "photo" and isinstance(value, list) and value:
+            candidate = value[-1]
+        else:
+            candidate = value
+        if isinstance(candidate, dict) and isinstance(candidate.get("file_id"), str):
+            file_ids.append(candidate["file_id"])
+    if file_ids:
+        prefix = f"album:{media_group_id}" if media_group_id else "media"
+        return f"{prefix}:{','.join(file_ids)}"
+    return f"message:{message.get('chat', {}).get('id', '')}:{message_id or update_id}"
+
+
+def _answer_callback(callback_id: object, text: str | None = None, show_alert: bool = False) -> None:
+    if not isinstance(callback_id, str) or not hasattr(service.notifications, "answer_callback"):
+        return
+    try:
+        service.notifications.answer_callback(callback_id, text=text, show_alert=show_alert)
+    except TypeError:
+        # Keep simple fake adapters and older local adapters compatible.
+        service.notifications.answer_callback(callback_id)
 
 
 @app.get("/api/health")
@@ -308,6 +398,7 @@ def list_media(incident_id: str) -> list[MediaDescriptor]:
                     filename=asset.filename.replace("\\", "/").rsplit("/", 1)[-1],
                     mime_type=asset.mime_type,
                     size_bytes=asset.size_bytes,
+                    duration_seconds=asset.duration_seconds,
                     source=asset.source,
                     url=f"/api/incidents/{incident_id}/media/{asset.asset_id}",
                 )
@@ -315,8 +406,45 @@ def list_media(incident_id: str) -> list[MediaDescriptor]:
     return descriptors
 
 
+@app.get("/api/drafts")
+def list_drafts() -> list[dict]:
+    _require_local_draft_api()
+    result: list[dict] = []
+    for draft in service.list_active_telegram_drafts():
+        descriptors: list[dict] = []
+        for asset in draft.media:
+            descriptors.append(
+                MediaDescriptor(
+                    media_id=asset.asset_id,
+                    filename=asset.filename.replace("\\", "/").rsplit("/", 1)[-1],
+                    mime_type=asset.mime_type,
+                    size_bytes=asset.size_bytes,
+                    duration_seconds=asset.duration_seconds,
+                    source=asset.source,
+                    url=f"/api/drafts/{draft.draft_id}/media/{asset.asset_id}",
+                ).model_dump(mode="json")
+            )
+        result.append(
+            {
+                "draft_id": draft.draft_id,
+                "tenant_id": draft.tenant_id,
+                "property_id": draft.property_id,
+                "text_parts": draft.text_parts,
+                "media": descriptors,
+                "communications": [
+                    record.model_dump(mode="json")
+                    for record in service.list_draft_communications(draft.draft_id)
+                ],
+                "created_at": draft.created_at,
+                "updated_at": draft.updated_at,
+                "expires_at": draft.expires_at,
+            }
+        )
+    return result
+
+
 @app.get("/api/incidents/{incident_id}/media/{media_id}")
-def get_media(incident_id: str, media_id: str) -> Response:
+def get_media(incident_id: str, media_id: str, request: Request) -> Response:
     try:
         incident = service.get_incident(incident_id)
     except IncidentNotFound as exc:
@@ -331,14 +459,53 @@ def get_media(incident_id: str, media_id: str) -> Response:
     except ValueError as exc:
         raise HTTPException(status_code=500, detail="stored media is invalid") from exc
     filename = asset.filename.replace("\\", "/").rsplit("/", 1)[-1] or "media.bin"
-    return Response(
-        content=content,
-        media_type=asset.mime_type,
-        headers={
-            "Content-Disposition": f'inline; filename="{filename.replace(chr(34), "")}"',
-            "Cache-Control": "private, max-age=60",
-        },
+    return _media_response(asset, content, filename, request)
+
+
+def _media_response(asset: MediaAsset, content: bytes, filename: str, request: Request) -> Response:
+    headers = {
+        "Content-Disposition": f'inline; filename="{filename.replace(chr(34), "")}"',
+        "Cache-Control": "private, max-age=60",
+        "Accept-Ranges": "bytes",
+    }
+    range_header = request.headers.get("range")
+    if range_header and range_header.startswith("bytes=") and asset.mime_type.startswith("video/"):
+        start_end = range_header[6:].split("-", 1)
+        try:
+            start = int(start_end[0] or 0)
+            end = int(start_end[1]) if len(start_end) > 1 and start_end[1] else len(content) - 1
+        except ValueError:
+            start, end = 0, len(content) - 1
+        if 0 <= start <= end < len(content):
+            body = content[start : end + 1]
+            headers.update(
+                {
+                    "Content-Range": f"bytes {start}-{end}/{len(content)}",
+                    "Content-Length": str(len(body)),
+                }
+            )
+            return Response(content=body, status_code=206, media_type=asset.mime_type, headers=headers)
+    return Response(content=content, media_type=asset.mime_type, headers=headers)
+
+
+@app.get("/api/drafts/{draft_id}/media/{media_id}")
+def get_draft_media(draft_id: str, media_id: str, request: Request) -> Response:
+    _require_local_draft_api()
+    draft = next(
+        (candidate for candidate in service.list_active_telegram_drafts() if candidate.draft_id == draft_id),
+        None,
     )
+    if not draft or media_id not in {asset.asset_id for asset in draft.media}:
+        raise HTTPException(status_code=404, detail="media not found for draft")
+    asset = service.media_store.get(media_id)
+    if not asset or not asset.content_base64:
+        raise HTTPException(status_code=404, detail="media is unavailable")
+    try:
+        content = base64.b64decode(asset.content_base64, validate=True)
+    except ValueError as exc:
+        raise HTTPException(status_code=500, detail="stored media is invalid") from exc
+    filename = asset.filename.replace("\\", "/").rsplit("/", 1)[-1] or "media.bin"
+    return _media_response(asset, content, filename, request)
 
 
 @app.post("/api/incidents", response_model=Incident)
@@ -363,7 +530,7 @@ def incident_action(incident_id: str, request: ActionRequest) -> Incident:
 
 @app.post("/api/demo/seed", response_model=Incident)
 def seed_demo() -> Incident:
-    _require_demo_api()
+    _require_local_replay_api()
     media = build_demo_media()
     report = ReportInput(
         property_id="demo-tampines-101",
@@ -378,18 +545,19 @@ def seed_demo() -> Incident:
 
 @app.post("/api/demo/reset")
 def reset_demo() -> JSONResponse:
-    _require_demo_api()
+    _require_local_replay_api()
     global service
+    service.shutdown()
     service = create_service(settings)
     return JSONResponse({"status": "reset"})
 
 
 @app.post("/api/events/tasks")
-def task_event(payload: dict) -> dict[str, str]:
+def task_event(payload: TaskEvent) -> dict[str, str]:
     # The stable task ID becomes the action event ID; repeated Cloud Tasks delivery is a no-op.
-    task_id = str(payload.get("task_id", "unknown"))
-    task_type = str(payload.get("task_type", ""))
-    incident_id = str(payload.get("incident_id", ""))
+    task_id = payload.task_id
+    task_type = payload.task_type
+    incident_id = payload.incident_id
     if incident_id and task_id != "unknown":
         service.record_communication(
             communication_id=f"comm:scheduler:{task_id}",
@@ -416,7 +584,7 @@ def task_event(payload: dict) -> dict[str, str]:
                 ActionRequest(
                     action="vendor_timeout",
                     event_id=f"task-{task_id}",
-                    payload={"vendor_id": payload.get("payload", {}).get("vendor_id", "")},
+                    payload={"vendor_id": payload.payload.get("vendor_id", "")},
                 ),
             )
         elif task_type == "vendor_retry":
@@ -425,7 +593,7 @@ def task_event(payload: dict) -> dict[str, str]:
                 ActionRequest(
                     action="vendor_retry",
                     event_id=f"task-{task_id}",
-                    payload={"vendor_id": payload.get("payload", {}).get("vendor_id", "")},
+                    payload={"vendor_id": payload.payload.get("vendor_id", "")},
                 ),
             )
     except IncidentNotFound as exc:
@@ -487,11 +655,18 @@ def telegram_webhook(
         provider_message_id = str(callback.get("id") or message.get("message_id") or update_id)
 
         if len(parts) == 3 and parts[0] == "draft":
+            if parts[2] == "add":
+                _answer_callback(
+                    callback.get("id"),
+                    "Use the message box, 📎 attachment button, or 🎙 microphone below.",
+                )
+            else:
+                _answer_callback(callback.get("id"))
             tenant = _tenant_for_chat(chat_id)
             draft = service.repository.get_draft(parts[1])
             if not tenant or not draft or draft.telegram_chat_id != chat_id:
                 raise HTTPException(status_code=422, detail="draft callback is not authorized")
-            if parts[2] not in {"submit", "add", "cancel"}:
+            if parts[2] not in {"submit", "add", "undo", "clear", "cancel"}:
                 raise HTTPException(status_code=422, detail="unknown draft callback")
             if draft.submitted_incident_id and parts[2] != "submit":
                 raise HTTPException(status_code=422, detail="draft was already submitted")
@@ -510,28 +685,56 @@ def telegram_webhook(
                 delivery_status="received",
             )
             if parts[2] == "submit":
-                incident = service.submit_telegram_draft(
-                    draft.draft_id, chat_id, provider_message_id
-                )
-                service._notify(
-                    incident, f"Report submitted as {incident.incident_id}.", "report-submitted"
-                )
-                kind = "draft_submitted"
+                try:
+                    incident = service.submit_telegram_draft(
+                        draft.draft_id, chat_id, provider_message_id
+                    )
+                except ValueError as exc:
+                    service.send_draft_message(
+                        draft,
+                        str(exc),
+                        f"draft-submit-rejected:{draft.revision}",
+                        _draft_markup(draft),
+                    )
+                    kind = "draft_submit_rejected"
+                else:
+                    service._notify(
+                        incident, f"Report submitted as {incident.incident_id}.", "report-submitted"
+                    )
+                    kind = "draft_submitted"
             elif parts[2] == "cancel":
                 service.cancel_telegram_draft(draft.draft_id, chat_id)
                 service.send_draft_message(
-                    draft, "Draft cancelled. No incident was created.", "draft-cancelled"
+                    draft, "Draft cancelled. No incident was created.", f"draft-cancelled:{draft.revision}"
                 )
                 kind = "draft_cancelled"
+            elif parts[2] == "undo":
+                draft = service.undo_telegram_draft(draft.draft_id, chat_id)
+                service.send_draft_message(
+                    draft,
+                    "Removed the last report item.\n\n" + service.draft_summary(draft),
+                    service.draft_summary_action_key(draft),
+                    _draft_markup(draft),
+                )
+                kind = "draft_undo"
+            elif parts[2] == "clear":
+                draft = service.clear_telegram_draft(draft.draft_id, chat_id)
+                service.send_draft_message(
+                    draft,
+                    "Draft cleared. You can add new text or media.\n\n" + service.draft_summary(draft),
+                    service.draft_summary_action_key(draft),
+                    _draft_markup(draft),
+                )
+                kind = "draft_cleared"
             else:
                 service.send_draft_message(
-                    draft, service.draft_summary(draft), "draft-summary", _draft_markup(draft)
+                    draft,
+                    "Use the message box, 📎 attachment button, or 🎙 microphone below.\n\n"
+                    + service.draft_summary(draft),
+                    service.draft_summary_action_key(draft),
+                    _draft_markup(draft),
                 )
                 kind = "draft_add_more"
-            if hasattr(service.notifications, "answer_callback") and isinstance(
-                callback.get("id"), str
-            ):
-                service.notifications.answer_callback(callback["id"])
             return {"status": "processed", "kind": kind}
 
         if len(parts) == 3 and parts[0] == "tenant":
@@ -657,7 +860,7 @@ def telegram_webhook(
             raise HTTPException(
                 status_code=403, detail="chat is not seeded for this synthetic demo"
             )
-        service.started_telegram_chats.add(chat_id)
+        service.mark_telegram_delivery_ready(chat_id)
         service.notifications.send(
             NotificationMessage(
                 "onboarding",
@@ -738,10 +941,10 @@ def telegram_webhook(
                 delivery_status="received",
             )
             service.send_draft_message(
-                draft, service.draft_summary(draft), "draft-summary", _draft_markup(draft)
+                draft, service.draft_summary(draft), service.draft_summary_action_key(draft), _draft_markup(draft)
             )
             return {"status": "processed", "kind": "draft_started"}
-        if command in {"/cancel", "/submit", "/add"}:
+        if command in {"/cancel", "/submit", "/add", "/undo", "/clear"}:
             if not draft:
                 service.notifications.send(
                     NotificationMessage(
@@ -768,7 +971,7 @@ def telegram_webhook(
                     delivery_status="received",
                 )
                 service.send_draft_message(
-                    draft, "Draft cancelled. No incident was created.", "draft-cancelled"
+                    draft, "Draft cancelled. No incident was created.", f"draft-cancelled:{draft.revision}"
                 )
                 service.cancel_telegram_draft(draft.draft_id, chat_id)
                 return {"status": "processed", "kind": "draft_cancelled"}
@@ -788,9 +991,31 @@ def telegram_webhook(
                     delivery_status="received",
                 )
                 service.send_draft_message(
-                    draft, service.draft_summary(draft), "draft-summary", _draft_markup(draft)
+                    draft,
+                    "Use the message box, 📎 attachment button, or 🎙 microphone below.\n\n"
+                    + service.draft_summary(draft),
+                    service.draft_summary_action_key(draft),
+                    _draft_markup(draft),
                 )
                 return {"status": "processed", "kind": "draft_add_more"}
+            if command == "/undo":
+                draft = service.undo_telegram_draft(draft.draft_id, chat_id)
+                service.send_draft_message(
+                    draft,
+                    "Removed the last report item.\n\n" + service.draft_summary(draft),
+                    service.draft_summary_action_key(draft),
+                    _draft_markup(draft),
+                )
+                return {"status": "processed", "kind": "draft_undo"}
+            if command == "/clear":
+                draft = service.clear_telegram_draft(draft.draft_id, chat_id)
+                service.send_draft_message(
+                    draft,
+                    "Draft cleared. You can add new text or media.\n\n" + service.draft_summary(draft),
+                    service.draft_summary_action_key(draft),
+                    _draft_markup(draft),
+                )
+                return {"status": "processed", "kind": "draft_cleared"}
             service.record_communication(
                 communication_id=f"comm:telegram:{update_id}:draft-command",
                 incident_id=f"draft:{draft.draft_id}",
@@ -805,12 +1030,27 @@ def telegram_webhook(
                 provider_message_id=provider_message_id,
                 delivery_status="received",
             )
-            incident = service.submit_telegram_draft(draft.draft_id, chat_id, provider_message_id)
+            try:
+                incident = service.submit_telegram_draft(draft.draft_id, chat_id, provider_message_id)
+            except ValueError as exc:
+                service.send_draft_message(
+                    draft, str(exc), f"draft-submit-rejected:{draft.revision}", _draft_markup(draft)
+                )
+                return {"status": "processed", "kind": "draft_submit_rejected"}
             service._notify(
                 incident, f"Report submitted as {incident.incident_id}.", "report-submitted"
             )
             return {"status": "processed", "kind": "draft_submitted"}
         if draft:
+            item_key = _draft_item_key(update_id, message)
+            if item_key in draft.item_keys:
+                service.send_draft_message(
+                    draft,
+                    service.draft_summary(draft),
+                    service.draft_summary_action_key(draft),
+                    _draft_markup(draft),
+                )
+                return {"status": "processed", "kind": "draft_duplicate_item"}
             media = _telegram_media(message, "tenant")
             draft = service.append_telegram_draft(
                 draft.draft_id,
@@ -819,9 +1059,10 @@ def telegram_webhook(
                 media=media,
                 communication_id=f"comm:telegram:{update_id}:draft-update",
                 provider_message_id=provider_message_id,
+                item_key=item_key,
             )
             service.send_draft_message(
-                draft, service.draft_summary(draft), "draft-summary", _draft_markup(draft)
+                draft, service.draft_summary(draft), service.draft_summary_action_key(draft), _draft_markup(draft)
             )
             return {"status": "processed", "kind": "draft_update"}
         service.notifications.send(
@@ -849,7 +1090,13 @@ def telegram_webhook(
             recipient_id="no-more-buckets",
             channel="telegram",
             direction="inbound",
-            message_type="image" if media else "text",
+            message_type=(
+                "video"
+                if any(asset.mime_type.startswith("video/") for asset in media)
+                else "image"
+                if media
+                else "text"
+            ),
             text=text or "Vendor submitted a Telegram update.",
             media_ids=[asset.asset_id for asset in media],
             provider_message_id=provider_message_id,

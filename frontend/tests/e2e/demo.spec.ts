@@ -4,9 +4,10 @@ test("runs the happy-path demo through closure", async ({ page }) => {
   await page.request.post("/api/demo/reset");
   await page.goto("/");
   await page.getByRole("button", { name: /replay deterministic scenario/i }).click();
-  await expect(page.getByText("CLOSED").first()).toBeVisible({ timeout: 15_000 });
-  await expect(page.getByText(/vendor b fallback/i)).toBeVisible();
-  await expect(page.getByText(/completion evidence assessed/i)).toBeVisible();
+  await expect(page.getByText(/vendor b fallback/i).last()).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByText("CLOSED").first()).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByText(/vendor quote recorded/i).last()).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByText(/completion evidence assessed/i).last()).toBeVisible({ timeout: 10_000 });
 });
 
 test("renders the persisted timeline surface", async ({ page }) => {

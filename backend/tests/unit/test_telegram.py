@@ -4,6 +4,7 @@ from pydantic import SecretStr
 
 from app.adapters import (
     DemoTelegramVendorAdapter,
+    NotificationMessage,
     TelegramBotAdapter,
     TelegramVendorAdapter,
     parse_telegram_vendor_reply,
@@ -23,6 +24,7 @@ def test_default_config_is_telegram_sgd_250_and_exact_gemini_model() -> None:
         8,
         12,
     )
+    assert settings.human_vendor_timeout_seconds == 600
     assert settings.tenant_confirmation_delay_seconds == 15
     assert settings.demo_warranty_period_seconds == 30
 
@@ -32,6 +34,11 @@ def test_telegram_username_is_optional_but_must_not_include_at_sign() -> None:
     assert settings.telegram_bot_username == "NoMoreBucketsBot"
     with pytest.raises(ValueError, match="without @"):
         Settings(_env_file=None, telegram_bot_username="@NoMoreBucketsBot")
+
+
+def test_notification_message_preserves_safe_line_breaks() -> None:
+    message = NotificationMessage("inc", "chat", " first\r\nsecond\r\n\r\nthird\x00\n\n\n", "key")
+    assert message.text == "first\nsecond\n\nthird"
 
 
 def test_older_gemini_model_is_rejected() -> None:

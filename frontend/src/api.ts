@@ -22,7 +22,9 @@ export type ReportAssessment = {
     water_source?: string;
     electrical_hazard: boolean;
     structural_hazard: boolean;
+    gas_hazard: boolean;
     occupant_danger: boolean;
+    uncontrolled_flooding: boolean;
     access_available: boolean;
     estimated_cost?: number;
     affected_rooms: string[];
@@ -45,7 +47,7 @@ export type CommunicationRecord = {
   recipient_id: string;
   channel: string;
   direction: "inbound" | "outbound";
-  message_type: "text" | "image" | "audio" | "button" | "invoice" | "system";
+  message_type: "text" | "image" | "video" | "audio" | "button" | "invoice" | "system";
   text: string;
   media_ids: string[];
   provider_message_id?: string;
@@ -58,6 +60,7 @@ export type MediaDescriptor = {
   filename: string;
   mime_type: string;
   size_bytes: number;
+  duration_seconds?: number;
   source: "tenant" | "vendor" | "system";
   url: string;
 };
@@ -84,13 +87,25 @@ export type Incident = {
   assigned_vendor_id?: string;
   vendor_attempts: { vendor_id: string; outcome: string; attempt_id: string; event_id: string; at: string; deadline_at?: string }[];
   eta?: string;
-  work_order?: { estimated_cost: number; spending_limit: number; currency: string; status: string };
+  work_order?: { estimated_cost?: number; authorized_amount: number; spending_limit: number; currency: string; status: string; scope?: string };
   approval?: { status: string; requested_amount: number; limit: number };
   last_evidence?: { passed: boolean; blocking_reasons: string[]; photo_confidence: number; invoice_total?: number };
   warranty_expires_at?: string;
   created_at: string;
   updated_at: string;
   timeline: TimelineEntry[];
+};
+
+export type TelegramDraft = {
+  draft_id: string;
+  tenant_id: string;
+  property_id: string;
+  text_parts: string[];
+  media: MediaDescriptor[];
+  communications: CommunicationRecord[];
+  created_at: string;
+  updated_at: string;
+  expires_at: string;
 };
 
 export type RuntimeMetadata = {
@@ -115,6 +130,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   runtime: () => request<RuntimeMetadata>("/api/runtime"),
   incidents: () => request<Incident[]>("/api/incidents"),
+  drafts: () => request<TelegramDraft[]>("/api/drafts"),
   seed: () => request<Incident>("/api/demo/seed", { method: "POST" }),
   report: (report: Record<string, unknown>) => request<Incident>("/api/incidents", { method: "POST", body: JSON.stringify(report) }),
   incident: (id: string) => request<Incident>(`/api/incidents/${id}`),

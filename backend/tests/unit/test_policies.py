@@ -1,6 +1,9 @@
+from datetime import UTC, datetime
+
 from app.models import (
     CompletionEvidence,
     CompletionPhotoFacts,
+    Incident,
     Invoice,
     InvoiceLineItem,
     ObservableFacts,
@@ -10,6 +13,7 @@ from app.models import (
 )
 from app.policies import (
     assess_completion,
+    build_bounded_work_order,
     evaluate_safety,
     rank_eligible_vendors,
     requires_spending_approval,
@@ -81,11 +85,28 @@ def test_evidence_gate_rejects_mismatch_and_accepts_scoped_invoice(completion_me
     ).passed
 
 
-def test_conflicting_or_low_confidence_facts_escalate() -> None:
+def test_named_safety_hazards_escalate_but_diagnostic_uncertainty_does_not() -> None:
     assert evaluate_safety(ObservableFacts(source_confidence=0.4)).rule_id == "FACTS_LOW_CONFIDENCE"
-    assert (
-        evaluate_safety(
-            ObservableFacts(uncertainties=["photo conflicts with text"], source_confidence=0.95)
-        ).rule_id
-        == "FACTS_CONFLICT_OR_UNCERTAIN"
+    ordinary_uncertainty = ObservableFacts(
+        issue_type="leak", uncertainties=["exact trap component unknown"], source_confidence=0.95
     )
+    assert evaluate_safety(ordinary_uncertainty).safe_to_contain
+    assert evaluate_safety(ObservableFacts(issue_type="leak", gas_hazard=True, source_confidence=0.95)).rule_id == "SAFETY_GAS_HAZARD"
+    assert evaluate_safety(ObservableFacts(issue_type="leak", uncontrolled_flooding=True, source_confidence=0.95)).rule_id == "SAFETY_UNCONTROLLED_FLOODING"
+    assert evaluate_safety(ObservableFacts(issue_type="unknown", source_confidence=0.95)).rule_id == "FACTS_UNRECOGNIZABLE_INCIDENT"
+
+
+def test_unknown_initial_cost_is_bounded_at_property_cap() -> None:
+    incident = Incident(
+        incident_id="inc-unknown-cost",
+        property_id="p",
+        tenant_id="t",
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
+    )
+    config = PropertyConfig(property_id="p", display_name="Unit 101", spending_limit=250)
+    order = build_bounded_work_order(incident, config, ObservableFacts(issue_type="leak"))
+    assert order.estimated_cost is None
+    assert order.authorized_amount == 250
+    assert order.status == "bounded"
+    assert not requires_spending_approval(order)

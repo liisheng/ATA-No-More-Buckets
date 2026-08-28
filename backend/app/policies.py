@@ -23,13 +23,13 @@ class SafetyDecision:
 
 
 def evaluate_safety(facts: ObservableFacts) -> SafetyDecision:
-    if facts.uncertainties:
-        return SafetyDecision(
-            False, True, "FACTS_CONFLICT_OR_UNCERTAIN", "observable evidence is conflicting"
-        )
     if facts.source_confidence < 0.75:
         return SafetyDecision(
             False, True, "FACTS_LOW_CONFIDENCE", "observable evidence confidence is low"
+        )
+    if facts.issue_type.value == "unknown":
+        return SafetyDecision(
+            False, True, "FACTS_UNRECOGNIZABLE_INCIDENT", "no recognizable plumbing incident was established"
         )
     if facts.occupant_danger:
         return SafetyDecision(False, True, "SAFETY_OCCUPANT_DANGER", "occupant danger reported")
@@ -39,11 +39,15 @@ def evaluate_safety(facts: ObservableFacts) -> SafetyDecision:
         )
     if facts.structural_hazard:
         return SafetyDecision(False, True, "SAFETY_STRUCTURAL_HAZARD", "possible structural damage")
-    if not facts.access_available:
-        return SafetyDecision(False, True, "ACCESS_UNAVAILABLE", "tenant access is not available")
-    if facts.severity.value == "critical":
+    if facts.gas_hazard:
         return SafetyDecision(
-            False, True, "SAFETY_CRITICAL_SEVERITY", "critical severity requires a human"
+            False, True, "SAFETY_GAS_HAZARD", "gas-related danger reported"
+        )
+    if facts.uncontrolled_flooding or (
+        facts.issue_type.value == "flood" and facts.severity.value == "critical"
+    ):
+        return SafetyDecision(
+            False, True, "SAFETY_UNCONTROLLED_FLOODING", "critical uncontrolled flooding reported"
         )
     return SafetyDecision(True, False, "SAFETY_CONTAINMENT_ALLOWED")
 
@@ -65,23 +69,35 @@ def property_specific_containment(config: PropertyConfig, facts: ObservableFacts
 def build_bounded_work_order(
     incident: Incident, config: PropertyConfig, facts: ObservableFacts
 ) -> WorkOrder:
-    estimate = facts.estimated_cost if facts.estimated_cost is not None else 300.0
-    scope = "Locate and stop the reported plumbing leak; document before/after condition."
+    estimate = round(facts.estimated_cost, 2) if facts.estimated_cost is not None else None
+    scope = (
+        "Diagnose and repair the reported under-sink plumbing leak. Stop water loss, identify the failed "
+        "component, and document before/after condition. Do not exceed S$250 without approval."
+    )
     return WorkOrder(
         work_order_id=f"wo_{incident.incident_id}",
         incident_id=incident.incident_id,
+        property_name=config.display_name,
         scope=scope,
         currency=config.currency,
         spending_limit=config.spending_limit,
-        estimated_cost=round(estimate, 2),
-        authorized_amount=config.spending_limit if estimate <= config.spending_limit else 0,
-        status="bounded" if estimate <= config.spending_limit else "approval_required",
-        approved=estimate <= config.spending_limit,
+        estimated_cost=estimate,
+        authorized_amount=config.spending_limit,
+        status=(
+            "bounded"
+            if estimate is None or estimate <= config.spending_limit
+            else "approval_required"
+        ),
+        approved=estimate is None or estimate <= config.spending_limit,
     )
 
 
 def requires_spending_approval(work_order: WorkOrder) -> bool:
-    return work_order.estimated_cost > work_order.spending_limit and not work_order.approved
+    return (
+        work_order.estimated_cost is not None
+        and work_order.estimated_cost > work_order.spending_limit
+        and not work_order.approved
+    )
 
 
 def rank_eligible_vendors(vendors: list[Vendor], config: PropertyConfig) -> list[Vendor]:

@@ -4,7 +4,7 @@ No More Buckets is a Google All Things Agentic Hackathon submission: a bounded i
 
 The product boundary is intentionally narrow. Gemini 3.5 Flash extracts schema-validated observable facts. Deterministic Python policies authorize safety actions, spending, access, vendor eligibility, retries, evidence gating, and closure. Tenant/vendor/media/invoice content is untrusted and never supplies policy instructions.
 
-Telegram Bot API is the primary MVP messaging provider. It accepts tenant text, photos, and voice notes; sends containment and status updates; dispatches vendors with Accept/Decline buttons; and accepts typed `PRICE <amount>` / `ETA <minutes>` replies. Twilio remains an optional adapter only and is not on the critical path. Every Telegram user must send `/start` to the bot before receiving outbound messages.
+Telegram Bot API is the primary MVP messaging provider. It accepts tenant text, photos, videos, and voice notes; sends containment and status updates; dispatches vendors with Accept/Decline buttons; and accepts typed `PRICE <amount>` / `ETA <minutes>` replies. Twilio remains an optional adapter only and is not on the critical path. Every Telegram user must send `/start` to the bot before receiving outbound messages.
 
 ## Quick start
 
@@ -106,13 +106,16 @@ Open the returned link in Telegram, or send `/start <code>` to the bot. **Each T
 
 ```text
 /report
-<send any number of text messages, photos, and voice notes>
-Submit report       # inline button; creates exactly one incident
-Add more            # inline button; keeps the same draft
-Cancel              # inline button; discards it
+<send any number of text messages, photos, videos, and voice notes>
+✅ Submit report        # creates exactly one incident
+➕ Add / edit items     # explains how to use the normal Telegram composer
+↩️ Undo last            # removes the latest draft item
+🗑 Cancel               # discards the draft
+
+/submit /undo /clear /cancel are also supported.
 ```
 
-Every update produces a draft summary. Drafts are persisted, expire after `TELEGRAM_DRAFT_EXPIRY_SECONDS`, and use Telegram `update_id` plus the draft idempotency key so duplicate delivery cannot create another incident. After `/start`, the paired tenant receives containment and live status updates. Gemini returns a schema-validated `ReportAssessment` with the faithful voice transcript when the Gemini provider is enabled; deterministic policy takes over for authorization.
+Every update produces a draft summary with text/photo/video/voice counts and a real expiry countdown. Drafts are persisted, expire after `TELEGRAM_DRAFT_EXPIRY_SECONDS`, and use Telegram `update_id`, message ID, file ID, and media-group ID so duplicate delivery cannot create another incident or duplicate media. The web console polls `/api/drafts` and shows the ordered pre-submit text/media with scoped media URLs and a pending-transcript label. After `/start`, the paired tenant receives containment and live status updates; delivery readiness is persisted with the tenant/vendor reference record. Gemini returns a schema-validated `ReportAssessment` with the faithful voice transcript when the Gemini provider is enabled; deterministic policy takes over for authorization.
 
 A paired vendor receives a bounded work order with inline **Accept**/**Decline** buttons. After accepting, the vendor can send `PRICE 220 ETA 20`, then tap **Start job**. The bot requests an after-photo with this exact caption shape:
 
@@ -124,7 +127,7 @@ SCOPE leak repair labor and replacement seal
 
 The deterministic evidence gate checks the vendor photo, invoice scope, vendor identity, currency, confidence, and spending authority. After the compressed confirmation delay, the tenant receives **Dry now** or **Still leaking**. Dry now closes the original incident; Still leaking reopens that same incident only within its warranty window.
 
-For the simplest Cloud Run demo, pair `vendor-b`, submit the tenant report from Telegram or the web UI, watch the visible Vendor A 8/12-second countdown expire, and show the Vendor B Telegram dispatch and reply. The local adapter uses the same timeout/fallback logic; the secondary replay advances the timeout explicitly so offline tests stay fast. The console displays a `Demo clock enabled` badge. Vendor A's late acceptance cannot replace Vendor B.
+For the simplest Cloud Run demo, pair `vendor-b`, submit the tenant report from Telegram, watch the visible Vendor A 8/12-second countdown expire, and show the Vendor B Telegram dispatch, acceptance, `PRICE 220 ETA 20`, Start job, completion evidence, and tenant confirmation. Cloud Run uses real wall-clock timestamps with compressed SLA durations. The deterministic replay is hidden in Cloud Run and is available only with local memory/local adapters; it advances the timeout explicitly so offline tests stay fast. Vendor A's late acceptance cannot replace Vendor B.
 
 The local/demo adapter remains the credential-free default when `TELEGRAM_BOT_TOKEN` is empty. It uses the same workflow and idempotency logic, but records messages locally instead of calling Telegram. The seeded catalog contains only synthetic chat IDs; never put a bot token, webhook secret, or Gemini key in Firestore or source control.
 

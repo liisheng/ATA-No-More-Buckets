@@ -7,11 +7,13 @@ from pydantic import SecretStr
 
 from app import main
 from app.adapters import (
+    DemoClock,
     DemoTelegramVendorAdapter,
     NotificationMessage,
     build_demo_media,
     build_demo_voice_media,
 )
+from app.service import IncidentService
 
 
 class FakeTelegram:
@@ -37,6 +39,8 @@ class FakeTelegram:
         if str(kwargs.get("mime_type", "")).startswith("audio/"):
             return build_demo_voice_media(file_id)
         asset = build_demo_media(file_id)
+        if str(kwargs.get("mime_type", "")).startswith("video/"):
+            return asset.model_copy(update={"mime_type": "video/mp4", "filename": "tenant-video.mp4"})
         return asset.model_copy(update={"source": source})
 
 
@@ -106,6 +110,8 @@ def submit_draft(client: TestClient, service, update_id: int):
 
 def move_vendor_a_timeout(client: TestClient, service):
     task = next(task for task in service.tasks.tasks.values() if task["type"] == "vendor_timeout")
+    attempt = next(attempt for attempt in service.get_incident(task["incident_id"]).vendor_attempts if attempt.vendor_id == "vendor-a")
+    service.clock.current = attempt.deadline_at
     response = client.post(
         "/api/events/tasks",
         json={
@@ -184,6 +190,109 @@ def test_text_photo_voice_updates_create_exactly_one_incident_and_duplicates_are
     )
 
 
+def test_video_draft_is_visible_and_summary_updates_are_not_deduplicated(monkeypatch, service):
+    client, fake = configure(monkeypatch, service)
+    start_report(client, 2010)
+    video = post(
+        client,
+        {
+            "update_id": 2013,
+            "message": {
+                "message_id": 3013,
+                "chat": {"id": 7101},
+                "video": {"file_id": "tenant-video", "duration": 7, "mime_type": "video/mp4"},
+                "caption": "The leak is visible from the side.",
+            },
+        },
+    )
+    assert video.json()["kind"] == "draft_update"
+    draft = service.repository.list_drafts("7101")[0]
+    assert sum(asset.mime_type.startswith("video/") for asset in draft.media) == 1
+    assert "Videos: 1" in fake.messages[-1].text
+    duplicate = post(
+        client,
+        {
+            "update_id": 2014,
+            "message": {
+                "message_id": 3014,
+                "chat": {"id": 7101},
+                "video": {"file_id": "tenant-video", "duration": 7, "mime_type": "video/mp4"},
+            },
+        },
+    )
+    assert duplicate.json()["kind"] == "draft_duplicate_item"
+    assert len(service.repository.list_drafts("7101")[0].media) == 1
+    draft_response = client.get("/api/drafts")
+    assert draft_response.status_code == 200
+    draft_body = draft_response.json()[0]
+    assert draft_body["media"][0]["mime_type"] == "video/mp4"
+    assert "telegram_chat_id" not in draft_body
+    media_response = client.get(draft_body["media"][0]["url"])
+    assert media_response.status_code == 200
+
+
+def test_telegram_album_items_and_duplicate_file_are_idempotent(monkeypatch, service):
+    client, _ = configure(monkeypatch, service)
+    start_report(client, 2030)
+    for update_id, file_id in ((2033, "album-photo-a"), (2034, "album-photo-b")):
+        response = post(
+            client,
+            {
+                "update_id": update_id,
+                "message": {
+                    "message_id": update_id,
+                    "media_group_id": "album-1",
+                    "chat": {"id": 7101},
+                    "photo": [{"file_id": file_id}],
+                },
+            },
+        )
+        assert response.json()["kind"] == "draft_update"
+    duplicate = post(
+        client,
+        {
+            "update_id": 2035,
+            "message": {
+                "message_id": 2035,
+                "media_group_id": "album-1",
+                "chat": {"id": 7101},
+                "photo": [{"file_id": "album-photo-a"}],
+            },
+        },
+    )
+    assert duplicate.json()["kind"] == "draft_duplicate_item"
+    draft = service.repository.list_drafts("7101")[0]
+    assert [asset.asset_id for asset in draft.media] == ["album-photo-a", "album-photo-b"]
+
+
+def test_delivery_readiness_survives_service_recreation(monkeypatch, service):
+    client, fake = configure(monkeypatch, service)
+    service.repository.seed_reference_data(service.properties, service.vendors, service.tenants)
+    assert post(client, {"update_id": 2040, "message": {"chat": {"id": 7101}, "text": "/start"}}).status_code == 200
+    assert post(client, {"update_id": 2041, "message": {"chat": {"id": 7202}, "text": "/start"}}).status_code == 200
+    persisted = service.repository.load_reference_data()
+    assert persisted is not None
+    properties, vendors, tenants = persisted
+    rebuilt = IncidentService(
+        settings=service.settings,
+        repository=service.repository,
+        extractor=service.extractor,
+        notifications=fake,
+        vendors_adapter=service.vendors_adapter,
+        evidence_verifier=service.evidence_verifier,
+        media_store=service.media_store,
+        event_bus=service.event_bus,
+        tasks=service.tasks,
+        properties=properties,
+        vendors=vendors,
+        tenants=tenants,
+        clock=DemoClock(),
+    )
+    assert {"7101", "7202"}.issubset(rebuilt.started_telegram_chats)
+    assert rebuilt.tenants["tenant-demo-001"].delivery_ready
+    assert next(vendor for vendor in rebuilt.vendors if vendor.vendor_id == "vendor-b").delivery_ready
+
+
 def test_repeated_submit_buttons_return_the_same_incident(monkeypatch, service):
     client, _ = configure(monkeypatch, service)
     start_report(client, 2050)
@@ -212,6 +321,33 @@ def test_repeated_submit_buttons_return_the_same_incident(monkeypatch, service):
     )
     assert first.json()["kind"] == second.json()["kind"] == "draft_submitted"
     assert len(service.list_incidents()) == 1
+
+
+def test_draft_undo_clear_and_empty_submit_are_explicit(monkeypatch, service):
+    client, _ = configure(monkeypatch, service)
+    assert post(client, {"update_id": 2070, "message": {"chat": {"id": 7101}, "text": "/start"}}).status_code == 200
+    assert post(client, {"update_id": 2071, "message": {"chat": {"id": 7101}, "text": "/report"}}).json()["kind"] == "draft_started"
+    draft = service.repository.list_drafts("7101")[0]
+    empty_submit = post(
+        client,
+        {
+            "update_id": 2073,
+            "callback_query": {
+                "id": "empty-submit",
+                "data": f"draft:{draft.draft_id}:submit",
+                "message": {"chat": {"id": 7101}},
+            },
+        },
+    )
+    assert empty_submit.json()["kind"] == "draft_submit_rejected"
+    post(client, {"update_id": 2074, "message": {"chat": {"id": 7101}, "text": "extra detail"}})
+    undone = post(client, {"update_id": 2075, "message": {"chat": {"id": 7101}, "text": "/undo"}})
+    assert undone.json()["kind"] == "draft_undo"
+    assert not service.repository.list_drafts("7101")[0].text_parts
+    cleared = post(client, {"update_id": 2076, "message": {"chat": {"id": 7101}, "text": "/clear"}})
+    assert cleared.json()["kind"] == "draft_cleared"
+    assert not service.repository.list_drafts("7101")[0].items
+    assert not service.list_incidents()
 
 
 def test_draft_cancel_and_expiry_discard_without_creating_incident(monkeypatch, service):
@@ -255,7 +391,27 @@ def test_vendor_timeout_dispatches_paired_vendor_b_and_late_vendor_a_cannot_win(
     assert incident.status.value == "DISPATCHING"
     incident = move_vendor_a_timeout(client, service)
     assert any(message.recipient_id == "7202" and message.reply_markup for message in fake.messages)
+    vendor_b_task = next(
+        task
+        for task in service.tasks.tasks.values()
+        if task["type"] == "vendor_timeout" and task["payload"].get("vendor_id") == "vendor-b"
+    )
+    assert vendor_b_task["delay_seconds"] == 600
+    vendor_message = next(message for message in fake.messages if message.recipient_id == "7202")
+    assert "\n\nWork order:" in vendor_message.text
+    assert "After acceptance, reply:\nPRICE" in vendor_message.text
     accept_and_start_vendor_b(client, incident, 2204)
+    vendor_b_timeout = client.post(
+        "/api/events/tasks",
+        json={
+            "task_id": vendor_b_task["task_id"],
+            "task_type": "vendor_timeout",
+            "incident_id": incident.incident_id,
+            "payload": vendor_b_task["payload"],
+        },
+    )
+    assert vendor_b_timeout.status_code == 200
+    assert service.get_incident(incident.incident_id).status.value == "IN_PROGRESS"
     late = post(
         client,
         {
@@ -336,7 +492,7 @@ def test_start_completion_evidence_and_tenant_buttons(monkeypatch, service):
     assert service.get_incident(incident.incident_id).status.value == "CLOSED"
 
 
-def test_mismatched_completion_photo_is_blocked_and_still_leaking_reopens(monkeypatch, service):
+def test_mismatched_completion_photo_blocks_later_completion_and_recurrence(monkeypatch, service):
     client, _ = configure(monkeypatch, service)
     start_report(client, 2500)
     incident = submit_draft(client, service, 2503)
@@ -368,6 +524,7 @@ def test_mismatched_completion_photo_is_blocked_and_still_leaking_reopens(monkey
         },
     )
     assert good.json()["kind"] == "completion_evidence"
+    assert service.get_incident(incident.incident_id).status.value == "ESCALATED"
     still_leaking = post(
         client,
         {
@@ -379,5 +536,5 @@ def test_mismatched_completion_photo_is_blocked_and_still_leaking_reopens(monkey
             },
         },
     )
-    assert still_leaking.json()["kind"] == "warranty_recurrence"
-    assert service.get_incident(incident.incident_id).status.value == "REOPENED"
+    assert still_leaking.status_code == 422
+    assert service.get_incident(incident.incident_id).status.value == "ESCALATED"

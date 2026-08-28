@@ -20,13 +20,15 @@ import {
   UserRound,
   Wrench,
 } from "lucide-react";
-import { api, CommunicationRecord, Incident, MediaDescriptor, RuntimeMetadata } from "./api";
+import { api, CommunicationRecord, Incident, MediaDescriptor, RuntimeMetadata, TelegramDraft } from "./api";
 
 function statusLabel(status: string) {
   return status.replaceAll("_", " ").toLowerCase();
 }
 
 function timelineLabel(kind: string) {
+  if (kind === "vendor_quote_recorded") return "Vendor quote recorded";
+  if (kind === "completion_evidence_assessed") return "Completion evidence assessed";
   return kind.replaceAll("_", " ");
 }
 
@@ -48,10 +50,13 @@ function displayParty(role: CommunicationRecord["sender_role"], id: string) {
 
 function MediaView({ media }: { media: MediaDescriptor }) {
   if (media.mime_type.startsWith("image/")) {
-    return <img className="media-preview" src={media.url} alt={media.filename} />;
+    return <a href={media.url} target="_blank" rel="noreferrer"><img className="media-preview" src={media.url} alt={`${media.filename} · open full size`} /></a>;
   }
   if (media.mime_type.startsWith("audio/")) {
     return <audio className="audio-player" controls preload="metadata"><source src={media.url} type={media.mime_type} />Your browser cannot play this voice note.</audio>;
+  }
+  if (media.mime_type.startsWith("video/")) {
+    return <video className="media-preview video-preview" controls preload="metadata"><source src={media.url} type={media.mime_type} />Your browser cannot play this video.</video>;
   }
   return <span className="media-file"><FileCheck2 size={14} /> {media.filename}</span>;
 }
@@ -78,15 +83,36 @@ function CommunicationCard({ communication, mediaById }: { communication: Commun
   );
 }
 
+function DraftPanel({ draft }: { draft: TelegramDraft }) {
+  const mediaById = new Map(draft.media.map((item) => [item.media_id, item]));
+  const textCount = draft.text_parts.length;
+  const photoCount = draft.media.filter((item) => item.mime_type.startsWith("image/")).length;
+  const videoCount = draft.media.filter((item) => item.mime_type.startsWith("video/")).length;
+  const voiceCount = draft.media.filter((item) => item.mime_type.startsWith("audio/")).length;
+  return (
+    <section className="draft-room panel">
+      <div className="panel-heading"><div><span className="kicker">INCOMING REPORT DRAFT</span><h2>Telegram is assembling a report</h2></div><span className="state-chip">NOT SUBMITTED</span></div>
+      <div className="draft-counts"><span><strong>{textCount}</strong> text messages</span><span><strong>{photoCount}</strong> photos</span><span><strong>{videoCount}</strong> videos</span><span><strong>{voiceCount}</strong> voice notes</span></div>
+      {draft.text_parts.length > 0 && <div className="draft-text">{draft.text_parts.map((part, index) => <p key={`${part}-${index}`}>{part}</p>)}</div>}
+      {draft.media.length > 0 && <div className="draft-media-grid">{draft.media.map((item) => <div key={item.media_id}><MediaView media={item} />{item.duration_seconds != null && <small>{item.duration_seconds}s</small>}</div>)}</div>}
+      <p className="draft-note">Transcript pending until Gemini processes the submitted report.</p>
+      <div className="communication-list draft-communications">{draft.communications.map((item) => <CommunicationCard key={item.communication_id} communication={item} mediaById={mediaById} />)}</div>
+    </section>
+  );
+}
+
 function App() {
   const [incident, setIncident] = useState<Incident | null>(null);
   const [runtime, setRuntime] = useState<RuntimeMetadata | null>(null);
   const [communications, setCommunications] = useState<CommunicationRecord[]>([]);
   const [media, setMedia] = useState<MediaDescriptor[]>([]);
+  const [draft, setDraft] = useState<TelegramDraft | null>(null);
   const [replayRunning, setReplayRunning] = useState(false);
   const [error, setError] = useState("");
   const [timeoutCountdown, setTimeoutCountdown] = useState<number | null>(null);
   const selectedIncidentId = useRef<string | null>(null);
+  const replayGeneration = useRef(0);
+  const replayRunningRef = useRef(false);
 
   useEffect(() => {
     api.runtime().then(setRuntime).catch((err: Error) => setError(err.message));
@@ -95,21 +121,23 @@ function App() {
   useEffect(() => {
     let active = true;
     async function refreshLiveIncident() {
+      if (replayRunning) return;
       try {
-        const incidents = await api.incidents();
-        if (!active) return;
+        const [incidents, drafts] = await Promise.all([api.incidents(), api.drafts()]);
+        if (!active || replayRunningRef.current) return;
         const next = [...incidents].sort((left, right) => right.updated_at.localeCompare(left.updated_at));
-        const selected = next.find((candidate) => candidate.incident_id === selectedIncidentId.current) ?? next[0];
+        const selected = next[0];
         if (!selected) {
           selectedIncidentId.current = null;
-          setIncident(null); setCommunications([]); setMedia([]);
+          setIncident(null); setCommunications([]); setMedia([]); setDraft(drafts[0] ?? null);
           return;
         }
         selectedIncidentId.current = selected.incident_id;
+        setDraft(null);
         const [current, nextCommunications, nextMedia] = await Promise.all([
           api.incident(selected.incident_id), api.communications(selected.incident_id), api.media(selected.incident_id),
         ]);
-        if (!active) return;
+        if (!active || replayRunningRef.current) return;
         setIncident(current); setCommunications(nextCommunications); setMedia(nextMedia);
       } catch (err) {
         if (active && !replayRunning) setError(err instanceof Error ? err.message : "Live update failed");
@@ -147,19 +175,38 @@ function App() {
   }, [incident?.incident_id, pendingAttempt?.event_id, timeoutSchedule?.event_id, runtime?.demo_clock_enabled]);
 
   async function startReplay() {
-    setError(""); setReplayRunning(true);
+    setError(""); replayRunningRef.current = true; setReplayRunning(true);
+    const generation = replayGeneration.current;
+    const ensureActive = () => { if (generation !== replayGeneration.current) throw new Error("Replay cancelled"); };
     try {
       let current = await api.seed();
+      ensureActive();
       selectedIncidentId.current = current.incident_id; setIncident(current);
-      await new Promise((resolve) => setTimeout(resolve, 450));
-      if (current.status === "DISPATCHING") {
-        current = await api.action(current.incident_id, "vendor_timeout", { vendor_id: "vendor-a" }); setIncident(current);
-      }
-      await new Promise((resolve) => setTimeout(resolve, 450));
+      const waitForVendorFallback = async () => {
+        const deadline = Date.now() + 20_000;
+        while (Date.now() < deadline) {
+          ensureActive();
+          current = await api.incident(current.incident_id);
+          setIncident(current);
+          if (current.status === "SCHEDULED" && current.assigned_vendor_id === "vendor-b") return;
+          if (current.status !== "DISPATCHING") throw new Error(`Replay stopped in ${current.status}`);
+          await new Promise((resolve) => setTimeout(resolve, 200));
+        }
+        throw new Error("Timed out waiting for Vendor B fallback");
+      };
+      await waitForVendorFallback();
+      ensureActive();
+      if (current.status !== "SCHEDULED" || current.assigned_vendor_id !== "vendor-b") throw new Error("Vendor B is not ready for quote");
+      current = await api.action(current.incident_id, "vendor_quote", { vendor_id: "vendor-b", amount: 220 }); setIncident(current);
+      ensureActive();
+      if (current.status !== "SCHEDULED") throw new Error(`Quote action stopped in ${current.status}`);
       current = await api.action(current.incident_id, "eta"); setIncident(current);
-      await new Promise((resolve) => setTimeout(resolve, 450));
+      ensureActive();
+      if (current.status !== "SCHEDULED") throw new Error(`ETA action stopped in ${current.status}`);
       current = await api.action(current.incident_id, "work_started"); setIncident(current);
-      await new Promise((resolve) => setTimeout(resolve, 450));
+      ensureActive();
+      if (current.status !== "IN_PROGRESS") throw new Error(`Start action stopped in ${current.status}`);
+      ensureActive();
       const photoContentBase64 = "iVBORw0KGgoAAAANSUhEUgAAAKAAAABkCAIAAACO1KzYAAABPUlEQVR42u3csQ3CMBBAUS/EACxAwRZULMAQdIzARIgWpUpJywYU6ZAICDvYuTzp95F4TXJ3InWPuwKX/ASABViABViABViAAQuwAAuwAAuwAAMWYAEWYAEWYAEWYMACLMACLMACLMCABViABVgtAl/7m+oGGDBgwIABC7AAqy3gzLb7gyIPOugCBgwYMGDAgAEDBgwYMOAlAWe2PncjrU6XUo0/aMhFx+TABUV/8AY8FfDfXD9KAy5ZRdd30oAD0r4wAw6rOwQ4sm77xolubONEN7YxYMCAAQMGDBiwt2jfwXRNskwrzaKXtHKwTSqwNwQcR3p2a/8Z/0dH9YsOwDO+4PnmJgtw5TO8/Cu+AHd36bjbKHCAAQuwAAuwAAuwAAMWYAEWYAEWYAEGLMACLMACLMACLMCABViAVa8n+J+v7cZifl4AAAAASUVORK5CYII=";
       const photoBytes = Uint8Array.from(atob(photoContentBase64), (character) => character.charCodeAt(0));
       const photo = { asset_id: "media-completion-photo", filename: "after-repair.png", mime_type: "image/png", size_bytes: photoBytes.length, sha256: "", content_base64: photoContentBase64, source: "vendor" };
@@ -167,10 +214,11 @@ function App() {
         photo: { ...photo, sha256: await digestBytes(photoBytes) },
         invoice: { invoice_id: "invoice-demo-001", vendor_id: current.assigned_vendor_id ?? "vendor-b", currency: "SGD", total: 220, line_items: [{ description: "leak repair labor and parts", quantity: 1, unit_price: 220 }] },
       }); setIncident(current);
-      await new Promise((resolve) => setTimeout(resolve, 450));
+      ensureActive();
+      if (current.status !== "PROVISIONALLY_RESOLVED") throw new Error(`Completion stopped in ${current.status}`);
       current = await api.action(current.incident_id, "tenant_confirm"); setIncident(current);
     } catch (err) { setError(err instanceof Error ? err.message : "Replay failed"); }
-    finally { setReplayRunning(false); }
+    finally { replayRunningRef.current = false; setReplayRunning(false); }
   }
 
   async function digestBytes(bytes: Uint8Array) {
@@ -179,7 +227,8 @@ function App() {
   }
 
   async function reset() {
-    setError(""); selectedIncidentId.current = null; setIncident(null); setCommunications([]); setMedia([]);
+    replayGeneration.current += 1;
+    setError(""); selectedIncidentId.current = null; setIncident(null); setCommunications([]); setMedia([]); setDraft(null);
     await fetch("/api/demo/reset", { method: "POST" });
   }
 
@@ -194,11 +243,11 @@ function App() {
   return (
     <main className="app-shell">
       <nav className="topbar"><div className="brand"><div className="brand-mark"><Droplets size={18} /></div><span>no more buckets</span></div><div className="topbar-right"><span className="live-dot" /> LIVE INCIDENT CONTROL ROOM <span className="pill">{runtime?.demo_clock_enabled ? "DEMO CLOCK ENABLED" : "LIVE CLOCK"}</span><span className="pill">TELEGRAM PRIMARY</span></div></nav>
-      <section className="hero"><div className="eyebrow"><Radio size={14} /> REAL REPORTS · REAL BACKEND EVENTS</div><h1>From first drip<br /><em>to done.</em></h1><p className="lede">A live control room for bounded leak response. Send a report to Telegram and watch the persisted incident, conversations, and decisions arrive here.</p><div className="hero-actions"><button className="primary-button" onClick={startReplay} disabled={replayRunning}><Play size={16} fill="currentColor" /> {replayRunning ? "Replaying deterministic scenario…" : "Replay deterministic scenario"}</button><button className="ghost-button" onClick={runException} disabled={replayRunning}><CircleAlert size={15} /> Try safety exception</button>{(incident || replayRunning) && <button className="ghost-button" onClick={reset}><RotateCcw size={15} /> Reset</button>}</div>{error && <div className="error-banner"><CircleAlert size={16} /> {error}</div>}</section>
+      <section className="hero"><div className="eyebrow"><Radio size={14} /> REAL REPORTS · REAL BACKEND EVENTS</div><h1>From first drip<br /><em>to done.</em></h1><p className="lede">A live control room for bounded leak response. Send a report to Telegram and watch the persisted incident, conversations, and decisions arrive here.</p>{runtime && runtime.deployment !== "cloud_run" && runtime.storage_backend !== "firestore" && <div className="hero-actions"><button className="primary-button" onClick={startReplay} disabled={replayRunning}><Play size={16} fill="currentColor" /> {replayRunning ? "Replaying deterministic scenario…" : "Replay deterministic scenario"}</button><button className="ghost-button" onClick={runException} disabled={replayRunning}><CircleAlert size={15} /> Try safety exception</button>{(incident || replayRunning) && <button className="ghost-button" onClick={reset}><RotateCcw size={15} /> Reset</button>}</div>}{error && <div className="error-banner"><CircleAlert size={16} /> {error}</div>}</section>
       <section className="proof-strip"><div><span className="proof-icon"><Cloud size={16} /></span><span><small>EXECUTION</small><strong>{runtime?.deployment ?? "loading"}</strong></span></div><div><span className="proof-icon"><Sparkles size={16} /></span><span><small>OBSERVATION LAYER</small><strong>{runtime?.facts_provider ?? "loading"} · {runtime?.facts_model ?? ""}</strong></span></div><div><span className="proof-icon"><LockKeyhole size={16} /></span><span><small>SOURCE OF TRUTH</small><strong>{runtime?.storage_backend ?? "loading"} · append-only timeline</strong><small className="timing-note">{runtime?.demo_clock_enabled ? "Demo clock enabled · 8s / 12s / 15s / 30s" : "Live SLA timers"}</small></span></div></section>
       <section className="live-banner"><span className="live-dot" /><strong>LIVE BACKEND FEED</strong><span>Short polling every second · no page refresh</span><span className="live-banner-right">{incident ? `Watching ${shortId(incident.incident_id)}` : "Waiting for tenant report"}<RefreshCw size={13} /></span></section>
 
-      {!incident ? <section className="waiting-room panel"><Activity size={34} /><span className="kicker">PRIMARY EXPERIENCE</span><h2>Waiting for a real tenant report</h2><p>Tenant text, photo, or voice notes from Telegram will create the incident. The local adapter is available for development; the deterministic replay above is secondary.</p><div className="waiting-hint"><MessageCircle size={16} /> Every contact will appear with channel, sender, recipient, timestamp, and delivery status.</div></section> : <>
+      {!incident ? (draft ? <DraftPanel draft={draft} /> : <section className="waiting-room panel"><Activity size={34} /><span className="kicker">PRIMARY EXPERIENCE</span><h2>Waiting for a real tenant report</h2><p>Tenant text, photo, or voice notes from Telegram will create the incident. The local adapter is available for development; the deterministic replay above is secondary.</p><div className="waiting-hint"><MessageCircle size={16} /> Every contact will appear with channel, sender, recipient, timestamp, and delivery status.</div></section>) : <>
         <section className="incident-header panel"><div><span className="kicker">ACTIVE INCIDENT · {incident.incident_id}</span><h2>{incident.report_text || "Tenant submitted a multimodal report"}</h2><span className="incident-subline">{incident.property_id} · {incident.tenant_id} · updated {formatTime(incident.updated_at)}</span></div><span className="state-chip">{incident.status}</span></section>
         <section className="lane-grid">
           <div className="lane panel"><div className="lane-heading"><div><span className="kicker">LANE 01</span><h2><MessageCircle size={18} /> Tenant conversation</h2></div><span className="event-count">{tenantCommunications.length} contacts</span></div>{tenantCommunications.length ? <div className="communication-list">{tenantCommunications.map((item) => <CommunicationCard key={item.communication_id} communication={item} mediaById={mediaById} />)}</div> : <div className="empty-state compact"><MessageCircle size={24} /><p>Waiting for the tenant’s Telegram report.</p></div>}</div>
@@ -207,6 +256,7 @@ function App() {
         </section>
         <section className="lower-grid"><div className="timeline-card panel"><div className="panel-heading"><div><span className="kicker">PERSISTED AUDIT TIMELINE</span><h2>State changes and rule outcomes</h2></div><span className="event-count">{incident.timeline.length} events</span></div><div className="timeline">{incident.timeline.map((entry) => <div className="timeline-item" key={`${entry.event_id}-${entry.kind}`}><div className="timeline-dot" /><div className="timeline-copy"><div className="timeline-meta"><span>{formatTime(entry.at)}</span>{entry.rule_id && <code>{entry.rule_id}</code>}</div><strong>{timelineLabel(entry.kind)}</strong>{entry.state_to && <span className="transition">{entry.state_from} → {entry.state_to}</span>}{Boolean(entry.metadata.vendor_id) && <span className="timeline-detail">{String(entry.metadata.vendor_id)} · {String(entry.metadata.outcome ?? "")}</span>}{Boolean(entry.metadata.blocking_reasons) && <span className="timeline-detail danger-text">{String(entry.metadata.blocking_reasons)}</span>}</div></div>)}</div></div><div className="outcome-card panel"><div className="panel-heading"><div><span className="kicker">CONTROL GATES</span><h2>Exceptions stay narrow.</h2></div><Activity size={21} /></div><div className="guardrail-list"><div className={`guardrail ${fallback ? "active" : ""}`}><span className="guardrail-icon"><CircleAlert size={15} /></span><span><strong>Vendor fallback</strong><small>{fallback ? "Next eligible vendor contacted" : "Bounded vendor ranking"}</small></span></div><div className={`guardrail ${incident.approval ? "active" : ""}`}><span className="guardrail-icon"><LockKeyhole size={15} /></span><span><strong>Spending authority</strong><small>{incident.approval ? "Approval required" : "S$250 autonomous limit"}</small></span></div><div className={`guardrail ${incident.last_evidence?.passed ? "active" : ""}`}><span className="guardrail-icon"><ShieldCheck size={15} /></span><span><strong>Evidence gate</strong><small>{incident.last_evidence?.passed ? "Photo + invoice verified" : "Missing or mismatched evidence blocks close"}</small></span></div><div className={`guardrail ${incident.status === "CLOSED" ? "active" : ""}`}><span className="guardrail-icon"><Check size={15} /></span><span><strong>Current state</strong><small>{statusLabel(incident.status)}</small></span></div></div><div className="final-state"><span>WORKFLOW STATE</span><strong>{incident.status}</strong>{incident.warranty_expires_at && <small>Warranty through {new Date(incident.warranty_expires_at).toLocaleDateString()}</small>}</div></div></section>
       </>}
+      {incident?.status === "CLOSED" && <div className="replay-proof">Vendor B fallback · Vendor quote recorded · Completion evidence assessed</div>}
       <footer><span>NO MORE BUCKETS · ATA HACKATHON</span><span>SAFE AUTOMATION FOR SMALL RENTALS · TELEGRAM + BACKEND EVENTS</span></footer>
     </main>
   );
