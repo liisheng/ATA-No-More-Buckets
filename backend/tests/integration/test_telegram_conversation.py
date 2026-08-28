@@ -60,6 +60,15 @@ def configure(monkeypatch, service):
 
 
 def post(client: TestClient, update: dict):
+    message = update.get("message")
+    callback = update.get("callback_query")
+    envelope = callback if isinstance(callback, dict) else message
+    chat = (callback or {}).get("message", {}).get("chat") if isinstance(callback, dict) else (message or {}).get("chat")
+    if isinstance(envelope, dict) and isinstance(chat, dict):
+        sender_ids = {"7202": "vendor-b-user", "-100000000101": "vendor-a-user"}
+        sender_id = sender_ids.get(str(chat.get("id")))
+        if sender_id:
+            envelope.setdefault("from", {"id": sender_id})
     return client.post(
         "/api/webhooks/telegram",
         json=update,
@@ -453,6 +462,35 @@ def test_over_limit_quote_escalates(monkeypatch, service):
     assert service.get_incident(incident.incident_id).status.value == "ESCALATED"
 
 
+def test_vendor_group_member_without_authorized_user_id_cannot_mutate_job(monkeypatch, service):
+    client, _ = configure(monkeypatch, service)
+    start_report(client, 2310)
+    submit_draft(client, service, 2313)
+    incident = move_vendor_a_timeout(client, service)
+    session = service.repository.list_vendor_sessions("7202")[0]
+    unauthorized_accept = post(client, {
+        "update_id": 2314,
+        "callback_query": {
+            "id": "unauthorized-accept",
+            "from": {"id": "another-group-member"},
+            "data": f"vs:{session.session_id}:ac",
+            "message": {"chat": {"id": 7202}},
+        },
+    })
+    assert unauthorized_accept.json()["kind"] == "vendor_sender_unauthorized"
+    assert service.get_incident(incident.incident_id).status.value == "DISPATCHING"
+    assert service.repository.get_vendor_session(session.session_id).stage == "OFFERED"
+
+    accepted = post(client, {"update_id": 2315, "callback_query": {"id": "authorized-accept", "data": f"vs:{session.session_id}:ac", "message": {"chat": {"id": 7202}}}})
+    assert accepted.json()["kind"] == "vendor_session_callback"
+    unauthorized_price = post(client, {
+        "update_id": 2316,
+        "message": {"chat": {"id": 7202}, "from": {"id": "another-group-member"}, "text": "220"},
+    })
+    assert unauthorized_price.json()["kind"] == "vendor_sender_unauthorized"
+    assert service.repository.get_vendor_session(session.session_id).draft_price is None
+
+
 def test_start_completion_evidence_and_tenant_buttons(monkeypatch, service):
     client, fake = configure(monkeypatch, service)
     start_report(client, 2400)
@@ -471,6 +509,11 @@ def test_start_completion_evidence_and_tenant_buttons(monkeypatch, service):
     post(client, {"update_id": 24101, "callback_query": {"id": "prepare-2410", "data": f"vs:{session.session_id}:pr", "message": {"chat": {"id": 7202}}}})
     photo = post(client, {"update_id": 2411, "message": {"chat": {"id": 7202}, "photo": [{"file_id": "vendor-after"}]}})
     assert photo.json()["kind"] == "completion_photo"
+    image_records = [
+        record for record in service.list_communications(incident.incident_id)
+        if record.message_type == "image" and record.media_ids == ["vendor-after"]
+    ]
+    assert len(image_records) == 1
     post(client, {"update_id": 2412, "message": {"chat": {"id": 7202}, "text": "Replaced the failed sink seal and tested the joint."}})
     session = service.repository.get_vendor_session(session.session_id)
     assert session is not None

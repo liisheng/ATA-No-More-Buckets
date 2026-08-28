@@ -554,7 +554,7 @@ class IncidentService:
         if tenant or vendor:
             self.started_telegram_chats.add(telegram_chat_id)
 
-    def consume_pairing_code(self, code: str, telegram_chat_id: str) -> PairingCodeRecord:
+    def consume_pairing_code(self, code: str, telegram_chat_id: str, telegram_user_id: str | None = None) -> PairingCodeRecord:
         record = self.repository.consume_pairing_code(code, telegram_chat_id, datetime.now(UTC))
         if not record:
             raise ValueError("pairing code is invalid, expired, or already used")
@@ -570,6 +570,9 @@ class IncidentService:
             if not vendor_target:
                 raise ValueError("pairing target no longer exists")
             vendor_target.telegram_chat_id = telegram_chat_id
+            if telegram_user_id:
+                vendor_target.authorized_telegram_user_ids.add(telegram_user_id)
+                self.repository.add_vendor_telegram_user(vendor_target.vendor_id, telegram_user_id)
         self.repository.bind_telegram_chat(record.target_type, record.target_id, telegram_chat_id)
         self.mark_telegram_delivery_ready(telegram_chat_id)
         return record
@@ -1919,21 +1922,28 @@ class IncidentService:
                 "telegram" if self.notifications.provider_name == "telegram" else "local_demo"
             )
             completion_status = "received" if completion_channel == "telegram" else "simulated"
-            self.record_communication(
-                communication_id=f"comm:completion:{incident.incident_id}:{request.event_id}:image",
-                incident_id=incident.incident_id,
-                sender_role="vendor",
-                sender_id=vendor_id,
-                recipient_role="agent",
-                recipient_id="no-more-buckets",
-                channel=completion_channel,
-                direction="inbound",
-                message_type="image",
-                text="Completion evidence photo submitted.",
-                media_ids=[evidence.photo.asset_id],
-                provider_message_id=request.event_id,
-                delivery_status=completion_status,  # type: ignore[arg-type]
+            inbound_photo_exists = any(
+                record.direction == "inbound"
+                and record.sender_role == "vendor"
+                and evidence.photo.asset_id in record.media_ids
+                for record in self.repository.list_communications(incident.incident_id)
             )
+            if not inbound_photo_exists:
+                self.record_communication(
+                    communication_id=f"comm:completion:{incident.incident_id}:{request.event_id}:image",
+                    incident_id=incident.incident_id,
+                    sender_role="vendor",
+                    sender_id=vendor_id,
+                    recipient_role="agent",
+                    recipient_id="no-more-buckets",
+                    channel=completion_channel,
+                    direction="inbound",
+                    message_type="image",
+                    text="Completion evidence photo submitted.",
+                    media_ids=[evidence.photo.asset_id],
+                    provider_message_id=request.event_id,
+                    delivery_status=completion_status,  # type: ignore[arg-type]
+                )
         if evidence.invoice:
             vendor_id = incident.assigned_vendor_id or evidence.invoice.vendor_id
             completion_channel = (

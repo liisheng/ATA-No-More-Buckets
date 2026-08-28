@@ -33,6 +33,7 @@ def demo_vendors() -> list[Vendor]:
             distance_km=4,
             demo_behavior="timeout",
             telegram_chat_id="-100000000101",
+            authorized_telegram_user_ids={"vendor-a-user"},
         ),
         Vendor(
             vendor_id="vendor-b",
@@ -42,6 +43,7 @@ def demo_vendors() -> list[Vendor]:
             distance_km=7,
             demo_behavior="accept",
             telegram_chat_id="-100000000102",
+            authorized_telegram_user_ids={"vendor-b-user"},
         ),
     ]
 

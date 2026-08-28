@@ -32,6 +32,8 @@
 
 ## [PROGRESS]
 
+- 2026-08-29T00:10+08:00 [CODE] Vendor group authorization now requires a persisted allowed Telegram sender ID in addition to the paired chat ID; pairing adds the sender to that vendor’s allowlist. Completion assessment reuses the inbound vendor photo communication instead of adding a second image card.
+
 - 2026-08-28T22:55+08:00 [CODE] Bound vendor Telegram callbacks and text intake to persisted chat/vendor/incident sessions; terminalized declined/timed-out/completed sessions; corrected group ForceReply markup and added the explicit Start job → Prepare completion boundary. Completion-photo handling now reuses the inbound Telegram communication record, and final-price approval withholds completion submission.
 
 - 2026-08-28T22:35+08:00 [CODE] Accepted vendor intake cancellation now resets unsubmitted quote/ETA work to `AWAITING_PRICE` while preserving the scheduled assignment; premature `/complete` returns current-step guidance instead of propagating `ValueError`.

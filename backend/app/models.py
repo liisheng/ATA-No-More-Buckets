@@ -165,6 +165,7 @@ class Vendor(StrictModel):
     distance_km: float = Field(default=5, ge=0)
     demo_behavior: Literal["accept", "decline", "timeout"] = "accept"
     telegram_chat_id: str | None = None
+    authorized_telegram_user_ids: set[str] = Field(default_factory=set)
     telegram_started_at: datetime | None = None
     delivery_ready: bool = False
 

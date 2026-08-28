@@ -165,6 +165,7 @@ def test_telegram_photo_voice_intake_and_callback_query(monkeypatch, service) ->
             "callback_query": {
                 "id": "callback-1",
                 "data": f"vendor:{incident.incident_id}:accept",
+                "from": {"id": "vendor-a-user"},
                 "message": {"chat": {"id": "-100000000101"}},
             },
         },
