@@ -115,6 +115,7 @@ function App() {
   const liveRefreshId = useRef(0);
   const liveSliceApplied = useRef<Record<"incidents" | "drafts" | "incident" | "communications" | "media", number>>({ incidents: 0, drafts: 0, incident: 0, communications: 0, media: 0 });
   const liveSliceErrors = useRef(new Map<string, string>());
+  const latestDrafts = useRef<TelegramDraft[]>([]);
   const replayGeneration = useRef(0);
   const replayRunningRef = useRef(false);
 
@@ -143,7 +144,8 @@ function App() {
       void api.drafts().then((nextDrafts) => {
         drafts = nextDrafts;
         applySlice("drafts", undefined, () => {
-          if (incidentsResolved && !selectedIncident && selectedIncidentId.current === null) setDraft(nextDrafts[0] ?? null);
+          latestDrafts.current = nextDrafts;
+          if (incidentsResolved && !selectedIncident && selectedIncidentId.current === null) setDraft(latestDrafts.current[0] ?? null);
         });
       }).catch((reason: unknown) => {
         applySlice("drafts", `Draft inspection failed: ${reason instanceof Error ? reason.message : "unknown error"}`, () => undefined);
@@ -157,7 +159,7 @@ function App() {
         if (!selected) {
           selectedIncident = false;
           selectedIncidentId.current = null;
-          setIncident(null); setCommunications([]); setMedia([]); setDraft(drafts?.[0] ?? null);
+          setIncident(null); setCommunications([]); setMedia([]); setDraft(latestDrafts.current[0] ?? drafts?.[0] ?? null);
           return;
         }
         selectedIncident = true;

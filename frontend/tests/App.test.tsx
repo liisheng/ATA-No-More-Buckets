@@ -223,6 +223,32 @@ it("applies a successful media slice even after the next polling interval starts
   expect(await screen.findByAltText(/slow\.png/i)).toBeInTheDocument();
 });
 
+it("keeps an early draft visible when a later empty incident poll wins", async () => {
+  const draft = {
+    draft_id: "draft-overlap", tenant_id: "tenant-1", property_id: "unit-1", text_parts: ["Draft arrived early"],
+    media: [], communications: [], created_at: "2026-08-28T10:00:00Z", updated_at: "2026-08-28T10:00:01Z", expires_at: "2026-08-28T10:15:00Z",
+  };
+  let incidentRequests = 0;
+  let draftRequests = 0;
+  let releaseFirstIncident!: () => void;
+  const delayedFirstIncident = new Promise<Response>((resolve) => { releaseFirstIncident = () => resolve({ ok: true, json: async () => [] } as Response); });
+  vi.stubGlobal("fetch", vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
+    const path = String(input);
+    if (path.endsWith("/api/runtime")) return { ok: true, json: async () => ({ environment: "demo", deployment: "local_container", facts_provider: "deterministic", facts_model: "gemini-3.5-flash", storage_backend: "memory", eventing: "local", messaging_provider: "local_demo", demo_clock_enabled: true, demo_timings_seconds: {}, synthetic_data_only: true }) };
+    if (path.endsWith("/api/incidents")) return incidentRequests++ === 0 ? delayedFirstIncident : { ok: true, json: async () => [] };
+    if (path.endsWith("/api/drafts")) {
+      if (draftRequests++ === 0) return { ok: true, json: async () => [draft] };
+      return new Promise<Response>(() => undefined);
+    }
+    return { ok: true, json: async () => [] };
+  }));
+
+  render(<App />);
+  await screen.findByText(/incoming report draft/i, {}, { timeout: 2500 });
+  expect(screen.getByText("Draft arrived early")).toBeInTheDocument();
+  await act(async () => { releaseFirstIncident(); });
+});
+
 it("discards out-of-order results from an older polling cycle", async () => {
   const oldIncident = {
     incident_id: "inc-old-poll", property_id: "unit-1", tenant_id: "tenant-1", status: "DISPATCHING" as const,
