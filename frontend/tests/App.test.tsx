@@ -1,5 +1,5 @@
 import { act, render, screen } from "@testing-library/react";
-import { beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import App from "../src/App";
 import { api } from "../src/api";
 
@@ -11,6 +11,12 @@ beforeEach(() => {
       : [];
     return { ok: true, json: async () => body };
   }));
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+  vi.useRealTimers();
 });
 
 it("renders the live control room and safety contract", async () => {
@@ -330,6 +336,11 @@ it("surfaces meaningful incident polling failures", async () => {
 });
 
 it("keeps vendor countdowns and outcomes attached to the matching vendor attempt", async () => {
+  const fixedNow = new Date("2099-01-01T00:00:00Z");
+  const at = (seconds: number) => new Date(fixedNow.getTime() + seconds * 1000).toISOString();
+  vi.useFakeTimers();
+  vi.setSystemTime(fixedNow);
+
   const pendingIncident = {
     incident_id: "inc-vendor-countdown",
     property_id: "unit-1",
@@ -338,15 +349,15 @@ it("keeps vendor countdowns and outcomes attached to the matching vendor attempt
     report_text: "Water is dripping under the sink",
     media_ids: [],
     vendor_attempts: [
-      { vendor_id: "vendor-a", outcome: "timed_out", attempt_id: "attempt-a", event_id: "event-a", at: "2026-08-28T10:00:00Z" },
-      { vendor_id: "vendor-b", outcome: "pending", attempt_id: "attempt-b", event_id: "event-b", at: "2099-01-01T00:00:00Z", deadline_at: "2099-01-01T00:10:00Z" },
+      { vendor_id: "vendor-a", outcome: "timed_out", attempt_id: "attempt-a", event_id: "event-a", at: at(-8) },
+      { vendor_id: "vendor-b", outcome: "pending", attempt_id: "attempt-b", event_id: "event-b", at: at(0), deadline_at: at(600) },
     ],
     created_at: "2026-08-28T10:00:00Z",
     updated_at: "2026-08-28T10:00:12Z",
     timeline: [
-      { event_id: "timeout-a", at: "2026-08-28T10:00:08Z", kind: "vendor_timeout_scheduled", metadata: { vendor_id: "vendor-a", timeout_seconds: 8, deadline_at: "2026-08-28T10:00:08Z" } },
-      { event_id: "timeout-b-old", at: "2099-01-01T00:00:01Z", kind: "vendor_timeout_scheduled", metadata: { vendor_id: "vendor-b", timeout_seconds: 30, deadline_at: "2099-01-01T00:00:30Z" } },
-      { event_id: "timeout-b-new", at: "2099-01-01T00:00:02Z", kind: "vendor_timeout_scheduled", metadata: { vendor_id: "vendor-b", timeout_seconds: 30, deadline_at: "2099-01-01T00:00:30Z" } },
+      { event_id: "timeout-a", at: at(0), kind: "vendor_timeout_scheduled", metadata: { vendor_id: "vendor-a", timeout_seconds: 8, deadline_at: at(0) } },
+      { event_id: "timeout-b-old", at: at(1), kind: "vendor_timeout_scheduled", metadata: { vendor_id: "vendor-b", timeout_seconds: 30, deadline_at: at(30) } },
+      { event_id: "timeout-b-new", at: at(2), kind: "vendor_timeout_scheduled", metadata: { vendor_id: "vendor-b", timeout_seconds: 30, deadline_at: at(30) } },
     ],
   };
   let currentIncident = pendingIncident;
@@ -361,24 +372,29 @@ it("keeps vendor countdowns and outcomes attached to the matching vendor attempt
   }));
 
   render(<App />);
-  await screen.findByText("Vendor A timed out / failed");
-  await screen.findByText(/Vendor B waiting for response · (?:10:00|09:5\d) remaining/);
+  await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+  expect(screen.getByText("Vendor A timed out / failed")).toBeInTheDocument();
+  expect(screen.getByText("Vendor B waiting for response · 10:00 remaining")).toBeInTheDocument();
   expect(screen.queryByText(/Vendor A timeout in 0s/)).not.toBeInTheDocument();
-  await screen.findByText(/Vendor B waiting for response · 09:5\d remaining/, {}, { timeout: 2500 });
+  await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+  expect(screen.getByText("Vendor B waiting for response · 09:59 remaining")).toBeInTheDocument();
 
   currentIncident = {
     ...pendingIncident,
     vendor_attempts: pendingIncident.vendor_attempts.map((attempt) => attempt.vendor_id === "vendor-b" ? { ...attempt, attempt_id: "attempt-b-fallback", deadline_at: undefined } : attempt),
-    updated_at: "2026-08-28T10:00:15Z",
+    updated_at: at(15),
   };
-  await screen.findByText(/Vendor B waiting for response · 00:\d\d remaining/);
+  await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+  await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+  expect(screen.getByText("Vendor B waiting for response · 00:29 remaining")).toBeInTheDocument();
 
   currentIncident = {
     ...pendingIncident,
     status: "SCHEDULED",
     vendor_attempts: pendingIncident.vendor_attempts.map((attempt) => attempt.vendor_id === "vendor-b" ? { ...attempt, outcome: "accepted" } : attempt),
-    updated_at: "2026-08-28T10:00:14Z",
-    timeline: [...pendingIncident.timeline, { event_id: "accepted-b", at: "2026-08-28T10:00:14Z", kind: "vendor_dispatch_outcome", metadata: { vendor_id: "vendor-b", outcome: "accept" } }],
+    updated_at: at(14),
+    timeline: [...pendingIncident.timeline, { event_id: "accepted-b", at: at(14), kind: "vendor_dispatch_outcome", metadata: { vendor_id: "vendor-b", outcome: "accept" } }],
   };
-  await screen.findByText("Vendor B accepted", {}, { timeout: 2500 });
+  await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+  expect(screen.getByText("Vendor B accepted")).toBeInTheDocument();
 });
