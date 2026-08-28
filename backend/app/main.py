@@ -846,8 +846,9 @@ def telegram_webhook(
                 elif parts[2] == "su":
                     service.submit_vendor_quote(session, f"telegram-action-{update_id}")
                 elif parts[2] == "cx":
-                    service.cancel_vendor_session(session)
-                    service._notify_vendor(service.get_incident(session.incident_id), vendor, "Draft cancelled. The accepted job was not changed.", f"vendor-session-cancelled:{session.session_id}")
+                    cancelled_session = service.cancel_vendor_session(session)
+                    message = "Intake reset. The job remains reserved. Send one SGD quote to continue." if cancelled_session.stage == "AWAITING_PRICE" else "Completion draft cancelled. Send /complete when the repair is finished." if cancelled_session.stage == "SUBMITTED" else "Offer cancelled."
+                    service._notify_vendor(service.get_incident(session.incident_id), vendor, message, f"vendor-session-cancelled:{session.session_id}")
                 elif parts[2] == "cr":
                     session.stage = "AWAITING_PHOTO"
                     service._save_vendor_session(session)
@@ -1208,11 +1209,16 @@ def telegram_webhook(
             service._notify_vendor(vendor_incident, vendor, _vendor_help(session), f"vendor-{command[1:]}:{session.session_id}")
             return {"status": "processed", "kind": f"vendor_{command[1:]}"}
         if command == "/cancel":
-            service.cancel_vendor_session(session)
-            service._notify_vendor(vendor_incident, vendor, "Draft cancelled. The accepted job and incident were not changed.", f"vendor-cancel:{session.session_id}")
+            cancelled_session = service.cancel_vendor_session(session)
+            message = "Intake reset. The job remains reserved. Send one SGD quote to continue." if cancelled_session.stage == "AWAITING_PRICE" else "Completion draft cancelled. Send /complete when the repair is finished." if cancelled_session.stage == "SUBMITTED" else "Offer cancelled."
+            service._notify_vendor(vendor_incident, vendor, message, f"vendor-cancel:{session.session_id}")
             return {"status": "processed", "kind": "vendor_cancelled"}
         if command == "/complete":
-            service.prepare_completion(session)
+            try:
+                service.prepare_completion(session)
+            except ValueError:
+                service._notify_vendor(vendor_incident, vendor, _vendor_help(session), f"vendor-complete-invalid:{session.session_id}:{session.revision}")
+                return {"status": "processed", "kind": "vendor_step_help"}
             return {"status": "processed", "kind": "vendor_completion_started"}
         if session.stage == "AWAITING_PHOTO" and media:
             service.completion_photo(session, media)

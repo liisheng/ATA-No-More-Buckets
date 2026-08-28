@@ -539,6 +539,37 @@ def test_cancel_completion_draft_keeps_accepted_job_resumable(monkeypatch, servi
     assert service.repository.get_vendor_session(session.session_id).stage == "SUBMITTED"
 
 
+def test_cancel_accepted_intake_resets_before_quote_submission(monkeypatch, service):
+    client, _ = configure(monkeypatch, service)
+    start_report(client, 2460)
+    incident = submit_draft(client, service, 2463)
+    incident = move_vendor_a_timeout(client, service)
+    post(client, {"update_id": 2464, "callback_query": {"id": "accept-2464", "data": f"vendor:{incident.incident_id}:accept", "message": {"chat": {"id": 7202}}}})
+    session = service.repository.list_vendor_sessions("7202")[0]
+    assert session.stage == "AWAITING_PRICE"
+    cancelled = post(client, {"update_id": 2465, "message": {"chat": {"id": 7202}, "text": "/cancel"}})
+    assert cancelled.json()["kind"] == "vendor_cancelled"
+    recovered = service.repository.get_vendor_session(session.session_id)
+    assert recovered.stage == "AWAITING_PRICE" and recovered.cancelled is False
+    assert recovered.draft_price is None and recovered.draft_eta is None
+    current = service.get_incident(incident.incident_id)
+    assert current.status.value == "SCHEDULED" and current.assigned_vendor_id == "vendor-b"
+    resumed = post(client, {"update_id": 2466, "message": {"chat": {"id": 7202}, "text": "220"}})
+    assert resumed.json()["kind"] == "vendor_price"
+
+
+def test_premature_complete_returns_current_vendor_step_help(monkeypatch, service):
+    client, fake = configure(monkeypatch, service)
+    start_report(client, 2470)
+    incident = submit_draft(client, service, 2473)
+    incident = move_vendor_a_timeout(client, service)
+    post(client, {"update_id": 2474, "callback_query": {"id": "accept-2474", "data": f"vendor:{incident.incident_id}:accept", "message": {"chat": {"id": 7202}}}})
+    response = post(client, {"update_id": 2475, "message": {"chat": {"id": 7202}, "text": "/complete"}})
+    assert response.status_code == 200
+    assert response.json()["kind"] == "vendor_step_help"
+    assert "Current step: AWAITING_PRICE" in fake.messages[-1].text
+
+
 def test_invalid_price_eta_and_photo_keep_the_current_step(monkeypatch, service):
     client, _ = configure(monkeypatch, service)
     start_report(client, 2500)

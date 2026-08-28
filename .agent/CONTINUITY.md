@@ -32,6 +32,8 @@
 
 ## [PROGRESS]
 
+- 2026-08-28T22:35+08:00 [CODE] Accepted vendor intake cancellation now resets unsubmitted quote/ETA work to `AWAITING_PRICE` while preserving the scheduled assignment; premature `/complete` returns current-step guidance instead of propagating `ValueError`.
+
 - 2026-08-28T22:20+08:00 [CODE] Fixed Telegram completion state pairing: final-price edits enter `CONFIRMING_FINAL_PRICE`, confirmed prices return to a review with Submit completion, and `/complete` resumes evidence collection after a completion-draft cancellation.
 
 - 2026-08-28T20:54+08:00 [TOOL] Pushed Luna commits through `291d45d`, staged Cloud Run revision `no-more-buckets-00014-bim` at zero traffic, verified its APIs and rendered live incident, then promoted it to 100% on the existing public URL.
@@ -105,6 +107,8 @@
 - 2026-08-25T23:41+08:00 [TOOL] Pub/Sub publishing is part of the cloud adapter, but end-to-end push delivery to `/api/events/pubsub` additionally requires a push subscription; workflow progression itself uses Cloud Tasks and does not depend on that subscription.
 
 ## [OUTCOMES]
+
+- 2026-08-28T22:35+08:00 [TOOL] Follow-up verification passes: full backend pytest, Ruff, mypy, and `git diff --check`; integration coverage includes pre-quote cancellation and premature `/complete`.
 
 - 2026-08-28T22:20+08:00 [TOOL] Follow-up verification passes: backend pytest, Ruff, mypy, and `git diff --check`; committed locally as `f648301`. No deployment or remote changes were made.
 

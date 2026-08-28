@@ -1322,6 +1322,7 @@ class IncidentService:
         return session
 
     def cancel_vendor_session(self, session: VendorSession) -> VendorSession:
+        incident, vendor = self._session_context(session)
         if session.submitted and session.stage in {"AWAITING_PHOTO", "AWAITING_SCOPE", "COMPLETION_REVIEW", "CONFIRMING_FINAL_PRICE"}:
             session.completion_photo_ids = []
             session.completion_scope = None
@@ -1333,6 +1334,17 @@ class IncidentService:
             return session
         if session.submitted:
             raise ValueError("An accepted job cannot be cancelled with /cancel.")
+        if session.stage != "OFFERED" and incident.assigned_vendor_id == vendor.vendor_id and incident.status.value == "SCHEDULED":
+            session.draft_price = None
+            session.draft_eta = None
+            session.price_confirmed = False
+            session.eta_confirmed = False
+            session.final_price = None
+            session.final_price_confirmed = False
+            session.cancelled = False
+            session.stage = "AWAITING_PRICE"
+            self._save_vendor_session(session)
+            return session
         session.cancelled = True
         session.stage = "CANCELLED"
         self._save_vendor_session(session)
