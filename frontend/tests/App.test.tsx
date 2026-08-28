@@ -189,6 +189,40 @@ it("renders incident details before a deferred media request completes", async (
   await act(async () => { releaseMedia(); });
 });
 
+it("applies a successful media slice even after the next polling interval starts", async () => {
+  const incident = {
+    incident_id: "inc-slow-media", property_id: "unit-1", tenant_id: "tenant-1", status: "DISPATCHING" as const,
+    report_text: "Slow media incident", media_ids: ["media-1"], vendor_attempts: [],
+    created_at: "2026-08-28T10:00:00Z", updated_at: "2026-08-28T10:00:01Z", timeline: [],
+  };
+  const communication = {
+    communication_id: "comm-1", incident_id: "inc-slow-media", sender_role: "tenant" as const, sender_id: "tenant-1",
+    recipient_role: "agent" as const, recipient_id: "agent", channel: "telegram", direction: "inbound" as const,
+    message_type: "image" as const, text: "Fast communication", media_ids: ["media-1"], delivery_status: "received" as const,
+    timestamp: "2026-08-28T10:00:00Z",
+  };
+  const media = { media_id: "media-1", filename: "slow.png", mime_type: "image/png", size_bytes: 4, source: "tenant" as const, url: "/media/slow.png" };
+  let mediaRequests = 0;
+  let releaseMedia!: () => void;
+  const deferredMedia = new Promise<Response>((resolve) => { releaseMedia = () => resolve({ ok: true, json: async () => [media] } as Response); });
+  vi.stubGlobal("fetch", vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
+    const path = String(input);
+    if (path.endsWith("/api/runtime")) return { ok: true, json: async () => ({ environment: "live", deployment: "cloud_run", facts_provider: "gemini", facts_model: "gemini-3.5-flash", storage_backend: "firestore", eventing: "cloud_tasks", messaging_provider: "telegram", demo_clock_enabled: false, demo_timings_seconds: {}, synthetic_data_only: false }) };
+    if (path.endsWith("/api/incidents")) return { ok: true, json: async () => [incident] };
+    if (path.endsWith("/api/drafts")) return { ok: false, status: 404, text: async () => "private" };
+    if (path.endsWith("/api/incidents/inc-slow-media")) return { ok: true, json: async () => incident };
+    if (path.endsWith("/communications")) return { ok: true, json: async () => [communication] };
+    if (path.endsWith("/media")) return mediaRequests++ === 0 ? deferredMedia : new Promise<Response>(() => undefined);
+    return { ok: true, json: async () => [] };
+  }));
+
+  render(<App />);
+  await screen.findByText("Fast communication");
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1100)); });
+  await act(async () => { releaseMedia(); });
+  expect(await screen.findByAltText(/slow\.png/i)).toBeInTheDocument();
+});
+
 it("discards out-of-order results from an older polling cycle", async () => {
   const oldIncident = {
     incident_id: "inc-old-poll", property_id: "unit-1", tenant_id: "tenant-1", status: "DISPATCHING" as const,

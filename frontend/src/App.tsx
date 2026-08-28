@@ -113,6 +113,8 @@ function App() {
   const timeoutCountdownAnchor = useRef<{ key: string; startedAt: number } | null>(null);
   const selectedIncidentId = useRef<string | null>(null);
   const liveRefreshId = useRef(0);
+  const liveSliceApplied = useRef<Record<"incidents" | "drafts" | "incident" | "communications" | "media", number>>({ incidents: 0, drafts: 0, incident: 0, communications: 0, media: 0 });
+  const liveSliceErrors = useRef(new Map<string, string>());
   const replayGeneration = useRef(0);
   const replayRunningRef = useRef(false);
 
@@ -125,72 +127,68 @@ function App() {
     function refreshLiveIncident() {
       if (replayRunning) return;
       const refreshId = ++liveRefreshId.current;
-      const isCurrent = () => active && refreshId === liveRefreshId.current && !replayRunningRef.current;
-      const errors = new Map<string, string>();
-      const updateErrors = (key: string, message?: string) => {
-        if (!isCurrent()) return;
-        if (message) errors.set(key, message); else errors.delete(key);
-        setError([...errors.values()].join(" · "));
+      const isActive = () => active && !replayRunningRef.current;
+      const applySlice = (slice: "incidents" | "drafts" | "incident" | "communications" | "media", message: string | undefined, apply: () => void) => {
+        if (!isActive() || refreshId < liveSliceApplied.current[slice]) return false;
+        liveSliceApplied.current[slice] = refreshId;
+        if (message) liveSliceErrors.current.set(slice, message); else liveSliceErrors.current.delete(slice);
+        if (!message) apply();
+        setError([...liveSliceErrors.current.values()].join(" · "));
+        return true;
       };
       let incidentsResolved = false;
       let selectedIncident = false;
       let drafts: TelegramDraft[] | undefined;
 
       void api.drafts().then((nextDrafts) => {
-        if (!isCurrent()) return;
         drafts = nextDrafts;
-        updateErrors("drafts");
-        if (incidentsResolved && !selectedIncident) setDraft(nextDrafts[0] ?? null);
+        applySlice("drafts", undefined, () => {
+          if (incidentsResolved && !selectedIncident && selectedIncidentId.current === null) setDraft(nextDrafts[0] ?? null);
+        });
       }).catch((reason: unknown) => {
-        if (!isCurrent()) return;
-        updateErrors("drafts", `Draft inspection failed: ${reason instanceof Error ? reason.message : "unknown error"}`);
+        applySlice("drafts", `Draft inspection failed: ${reason instanceof Error ? reason.message : "unknown error"}`, () => undefined);
       });
 
       void api.incidents().then((incidents) => {
-        if (!isCurrent()) return;
         incidentsResolved = true;
+        if (!applySlice("incidents", undefined, () => undefined)) return;
         const next = [...incidents].sort((left, right) => right.updated_at.localeCompare(left.updated_at));
         const selected = next[0];
         if (!selected) {
           selectedIncident = false;
           selectedIncidentId.current = null;
           setIncident(null); setCommunications([]); setMedia([]); setDraft(drafts?.[0] ?? null);
-          updateErrors("incidents");
           return;
         }
         selectedIncident = true;
         selectedIncidentId.current = selected.incident_id;
         setDraft(null);
-        updateErrors("incidents");
 
         void api.incident(selected.incident_id).then((current) => {
-          if (!isCurrent()) return;
-          setIncident(current);
-          updateErrors("incident");
+          if (selectedIncidentId.current !== selected.incident_id) return;
+          applySlice("incident", undefined, () => setIncident(current));
         }).catch((reason: unknown) => {
-          if (!isCurrent()) return;
-          updateErrors("incident", `Incident refresh failed: ${reason instanceof Error ? reason.message : "unknown error"}`);
+          if (selectedIncidentId.current !== selected.incident_id) return;
+          applySlice("incident", `Incident refresh failed: ${reason instanceof Error ? reason.message : "unknown error"}`, () => undefined);
         });
         void api.communications(selected.incident_id).then((nextCommunications) => {
-          if (!isCurrent()) return;
-          setCommunications(nextCommunications);
-          updateErrors("communications");
+          if (selectedIncidentId.current !== selected.incident_id) return;
+          applySlice("communications", undefined, () => setCommunications(nextCommunications));
         }).catch((reason: unknown) => {
-          if (!isCurrent()) return;
-          updateErrors("communications", `Communications refresh failed: ${reason instanceof Error ? reason.message : "unknown error"}`);
+          if (selectedIncidentId.current !== selected.incident_id) return;
+          applySlice("communications", `Communications refresh failed: ${reason instanceof Error ? reason.message : "unknown error"}`, () => undefined);
         });
         void api.media(selected.incident_id).then((nextMedia) => {
-          if (!isCurrent()) return;
-          setMedia(nextMedia);
-          updateErrors("media");
+          if (selectedIncidentId.current !== selected.incident_id) return;
+          applySlice("media", undefined, () => setMedia(nextMedia));
         }).catch((reason: unknown) => {
-          if (!isCurrent()) return;
-          updateErrors("media", `Media refresh failed: ${reason instanceof Error ? reason.message : "unknown error"}`);
+          if (selectedIncidentId.current !== selected.incident_id) return;
+          applySlice("media", `Media refresh failed: ${reason instanceof Error ? reason.message : "unknown error"}`, () => undefined);
         });
       }).catch((reason: unknown) => {
-        if (!isCurrent()) return;
+        if (!isActive()) return;
         incidentsResolved = true;
-        updateErrors("incidents", reason instanceof Error ? reason.message : "Live update failed");
+        applySlice("incidents", reason instanceof Error ? reason.message : "Live update failed", () => undefined);
       });
     }
     refreshLiveIncident();

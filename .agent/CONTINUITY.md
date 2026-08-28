@@ -27,6 +27,7 @@
 
 ## [PROGRESS]
 
+- 2026-08-28T20:05+08:00 [CODE] Replaced request-start invalidation with per-slice applied-generation tracking so slow successful responses remain eligible until a newer response for that slice is applied; selected-incident guards reject late detail results for superseded incidents.
 - 2026-08-28T20:02+08:00 [CODE] Reworked live refresh to apply incidents, drafts, and each detail slice as individual requests settle; monotonically increasing refresh IDs discard late results from older polling cycles.
 - 2026-08-28T19:41+08:00 [CODE] Independent live polling now settles incident, communications, and media detail requests separately; successful slices update immediately, failed slices retain prior state and report scoped errors.
 - 2026-08-28T19:27+08:00 [CODE] Fixed live control-room polling so the privacy-preserving draft endpoint is isolated from incident loading; only draft 404 responses become an empty list, while meaningful failures remain reportable.
@@ -92,6 +93,7 @@
 
 ## [OUTCOMES]
 
+- 2026-08-28T20:05+08:00 [TOOL] Verification for the slow-response freshness follow-up passes: frontend lint, 12 Vitest tests, production build, 3 Playwright scenarios, backend 62 passed/1 skipped, Ruff, mypy, and `git diff --check`.
 - 2026-08-28T20:02+08:00 [TOOL] Verification for polling concurrency follow-up passes: frontend lint, 11 Vitest tests, production build, 3 Playwright scenarios, backend 62 passed/1 skipped, Ruff, mypy, and `git diff --check`.
 - 2026-08-28T19:41+08:00 [TOOL] Verification for the detail-isolation follow-up passes: frontend lint, 9 Vitest tests, production build, 3 Playwright scenarios, backend 62 passed/1 skipped, Ruff, mypy, and `git diff --check`.
 - 2026-08-28T19:27+08:00 [TOOL] Frontend lint, 7 Vitest tests, production build, 3 Playwright scenarios, backend 62 passed/1 skipped, Ruff, mypy, and `git diff --check` pass for the live polling fix; commit pending.
