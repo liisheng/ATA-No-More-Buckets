@@ -1,6 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
 import App from "../src/App";
+import { api } from "../src/api";
 
 beforeEach(() => {
   vi.stubGlobal("fetch", vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
@@ -58,6 +59,61 @@ it("focuses the newest active incident when timestamps differ", async () => {
   await screen.findByText(/active incident · inc-new/i);
   expect(screen.getByText("Newest report")).toBeInTheDocument();
   expect(screen.queryByText("Older report")).not.toBeInTheDocument();
+});
+
+it("normalizes the privacy 404 from draft inspection to an empty list", async () => {
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+    ok: false,
+    status: 404,
+    text: async () => '{"detail":"draft inspection is disabled in live mode"}',
+  }));
+
+  await expect(api.drafts()).resolves.toEqual([]);
+});
+
+it("renders the newest live incident and its communications and media when drafts are private", async () => {
+  const communication = {
+    communication_id: "comm-1", incident_id: "inc-live", sender_role: "tenant" as const, sender_id: "tenant-1",
+    recipient_role: "agent" as const, recipient_id: "agent", channel: "telegram", direction: "inbound" as const,
+    message_type: "image" as const, text: "Leak photo", media_ids: ["media-1"], delivery_status: "received" as const,
+    timestamp: "2026-08-28T10:00:00Z",
+  };
+  const media = { media_id: "media-1", filename: "leak.png", mime_type: "image/png", size_bytes: 4, source: "tenant" as const, url: "/media/leak.png" };
+  const incident = {
+    incident_id: "inc-live", property_id: "unit-1", tenant_id: "tenant-1", status: "DISPATCHING" as const,
+    report_text: "Water is dripping under the sink", media_ids: ["media-1"], vendor_attempts: [],
+    created_at: "2026-08-28T10:00:00Z", updated_at: "2026-08-28T10:00:01Z", timeline: [],
+  };
+  vi.stubGlobal("fetch", vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
+    const path = String(input);
+    if (path.endsWith("/api/runtime")) return { ok: true, json: async () => ({ environment: "live", deployment: "cloud_run", facts_provider: "gemini", facts_model: "gemini-3.5-flash", storage_backend: "firestore", eventing: "cloud_tasks", messaging_provider: "telegram", demo_clock_enabled: false, demo_timings_seconds: {}, synthetic_data_only: false }) };
+    if (path.endsWith("/api/incidents")) return { ok: true, json: async () => [incident] };
+    if (path.endsWith("/api/drafts")) return { ok: false, status: 404, text: async () => '{"detail":"draft inspection is disabled in live mode"}' };
+    if (path.endsWith("/api/incidents/inc-live")) return { ok: true, json: async () => incident };
+    if (path.endsWith("/communications")) return { ok: true, json: async () => [communication] };
+    if (path.endsWith("/media")) return { ok: true, json: async () => [media] };
+    return { ok: true, json: async () => [] };
+  }));
+
+  render(<App />);
+  await screen.findByText(/active incident · inc-live/i);
+  expect(screen.getByText("Leak photo")).toBeInTheDocument();
+  expect(screen.getByAltText(/leak\.png/i)).toBeInTheDocument();
+  expect(screen.queryByText(/draft inspection is disabled/i)).not.toBeInTheDocument();
+  expect(screen.queryByText(/waiting for a real tenant report/i)).not.toBeInTheDocument();
+});
+
+it("surfaces meaningful incident polling failures", async () => {
+  vi.stubGlobal("fetch", vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
+    const path = String(input);
+    if (path.endsWith("/api/runtime")) return { ok: true, json: async () => ({ environment: "live", deployment: "cloud_run", facts_provider: "gemini", facts_model: "gemini-3.5-flash", storage_backend: "firestore", eventing: "cloud_tasks", messaging_provider: "telegram", demo_clock_enabled: false, demo_timings_seconds: {}, synthetic_data_only: false }) };
+    if (path.endsWith("/api/incidents")) return { ok: false, status: 503, text: async () => "incident service unavailable" };
+    if (path.endsWith("/api/drafts")) return { ok: false, status: 404, text: async () => '{"detail":"draft inspection is disabled in live mode"}' };
+    return { ok: true, json: async () => [] };
+  }));
+
+  render(<App />);
+  await screen.findByText("incident service unavailable");
 });
 
 it("keeps vendor countdowns and outcomes attached to the matching vendor attempt", async () => {

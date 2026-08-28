@@ -124,13 +124,18 @@ function App() {
     async function refreshLiveIncident() {
       if (replayRunning) return;
       try {
-        const [incidents, drafts] = await Promise.all([api.incidents(), api.drafts()]);
+        const [incidentsResult, draftsResult] = await Promise.allSettled([api.incidents(), api.drafts()]);
+        if (incidentsResult.status === "rejected") throw incidentsResult.reason;
+        const incidents = incidentsResult.value;
+        const drafts = draftsResult.status === "fulfilled" ? draftsResult.value : [];
         if (!active || replayRunningRef.current) return;
         const next = [...incidents].sort((left, right) => right.updated_at.localeCompare(left.updated_at));
         const selected = next[0];
         if (!selected) {
+          if (draftsResult.status === "rejected") throw draftsResult.reason;
           selectedIncidentId.current = null;
           setIncident(null); setCommunications([]); setMedia([]); setDraft(drafts[0] ?? null);
+          setError("");
           return;
         }
         selectedIncidentId.current = selected.incident_id;
@@ -140,6 +145,7 @@ function App() {
         ]);
         if (!active || replayRunningRef.current) return;
         setIncident(current); setCommunications(nextCommunications); setMedia(nextMedia);
+        setError(draftsResult.status === "rejected" ? (draftsResult.reason instanceof Error ? draftsResult.reason.message : "Draft inspection failed") : "");
       } catch (err) {
         if (active && !replayRunning) setError(err instanceof Error ? err.message : "Live update failed");
       }

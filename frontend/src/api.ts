@@ -123,14 +123,25 @@ export type RuntimeMetadata = {
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, { headers: { "Content-Type": "application/json" }, ...init });
-  if (!response.ok) throw new Error((await response.text()) || `Request failed: ${response.status}`);
+  if (!response.ok) {
+    const error = new Error((await response.text()) || `Request failed: ${response.status}`) as Error & { status?: number };
+    error.status = response.status;
+    throw error;
+  }
   return response.json() as Promise<T>;
 }
 
 export const api = {
   runtime: () => request<RuntimeMetadata>("/api/runtime"),
   incidents: () => request<Incident[]>("/api/incidents"),
-  drafts: () => request<TelegramDraft[]>("/api/drafts"),
+  drafts: async () => {
+    try {
+      return await request<TelegramDraft[]>("/api/drafts");
+    } catch (error) {
+      if (error instanceof Error && (error as Error & { status?: number }).status === 404) return [];
+      throw error;
+    }
+  },
   seed: () => request<Incident>("/api/demo/seed", { method: "POST" }),
   report: (report: Record<string, unknown>) => request<Incident>("/api/incidents", { method: "POST", body: JSON.stringify(report) }),
   incident: (id: string) => request<Incident>(`/api/incidents/${id}`),

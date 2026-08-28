@@ -27,6 +27,7 @@
 
 ## [PROGRESS]
 
+- 2026-08-28T19:27+08:00 [CODE] Fixed live control-room polling so the privacy-preserving draft endpoint is isolated from incident loading; only draft 404 responses become an empty list, while meaningful failures remain reportable.
 - 2026-08-28T19:03:21+08:00 [TOOL] Supersedes the 18:36 manual-test hold: independently verified Luna commit `f1bab93`, pushed it to `origin/main`, staged revision `no-more-buckets-00012-wiw` at zero traffic, verified the tagged frontend bundle/runtime/logs, then promoted it to 100%.
 - 2026-08-28T18:36:42+08:00 [CODE] Manual Telegram handoff remains withheld after post-release visual review found a frontend-only vendor countdown mismatch; revision `00010-rut` remains operational for backend/Telegram traffic while Luna prepares the correction.
 - 2026-08-28T18:35:54+08:00 [TOOL] Independently verified Luna's final patch, deployed Cloud Run revision `no-more-buckets-00010-rut` at zero traffic, validated the tagged candidate against health/UI/runtime/Firestore and the exact Gemini smoke, then promoted it to 100% on the existing public URL.
@@ -49,6 +50,7 @@
 
 ## [DISCOVERIES]
 
+- 2026-08-28T19:21:44+08:00 [TOOL] Live manual report `inc_dc555525fdae` is correctly persisted as `DISPATCHING` with 17 communications, two media assets, Vendor A timed out, and Vendor B pending until 2026-08-28T19:29:07+08:00. The deployed page nevertheless remains in its waiting state because `refreshLiveIncident()` awaits `/api/incidents` and the intentionally disabled live `/api/drafts` endpoint in one `Promise.all`; the expected draft `404` rejects the entire refresh and surfaces its JSON error instead of rendering the incident.
 - 2026-08-28T18:36:42+08:00 [CODE] Supersedes the fully-ready UI implication of the 18:35 release entry: `frontend/src/App.tsx` selects the first `vendor_timeout_scheduled` event rather than the event matching the current pending attempt, and the vendor proof rows hard-code any pending attempt as Vendor A. During real Vendor B's 600-second window the console can therefore show Vendor A at `0s` and Vendor B on standby even though backend/Telegram state is correct.
 - 2026-08-27T20:21:27+08:00 [CODE] The new deadline guard exposed two release blockers. Local replay uses a fixed `DemoClock`, but its wall-clock timer/API sends `vendor_timeout` before the stored deadline, so the timeout is perpetually ignored and Vendor B is never dispatched. The early-delivery branch also reschedules with the already-consumed deterministic task ID/event ID; Cloud Tasks rejects reuse of recently executed task names and the repository has already claimed that event, so the replacement cannot progress. Rescheduling must use a new task/event identity, and local scheduled delivery must advance the demo clock to the persisted deadline.
 - 2026-08-27T20:07:56+08:00 [CODE] `_vendor_timeout_seconds(incident)` currently applies the same severity-based 8/12-second timeout to every vendor, so the real human Vendor B can time out before accepting and immediately trigger `VENDOR_POOL_EXHAUSTED`. `_safe_contact_text()` removes non-printable newline characters and then joins all whitespace, collapsing the already-correct multiline `draft_summary()` into one Telegram paragraph and likewise flattening stored communication text.
@@ -88,6 +90,7 @@
 
 ## [OUTCOMES]
 
+- 2026-08-28T19:27+08:00 [TOOL] Frontend lint, 7 Vitest tests, production build, 3 Playwright scenarios, backend 62 passed/1 skipped, Ruff, mypy, and `git diff --check` pass for the live polling fix; commit pending.
 - 2026-08-28T19:03:21+08:00 [CODE] Vendor proof rows now derive Vendor A and Vendor B states independently, select the newest timeout schedule matching the pending vendor, prefer the attempt deadline, and show Vendor B's live human-response window as `MM:SS`.
 - 2026-08-28T19:03:21+08:00 [TOOL] Revision `no-more-buckets-00012-wiw` is live at 100% with the expected `index-Bg2KGTQ-.js` frontend, 600-second human-vendor timeout, healthy Telegram webhook with zero pending updates/no last error, RUNNING Cloud Tasks queue, and no revision error logs. Independent checks pass: backend 62 passed/1 skipped, Ruff, mypy, frontend ESLint, 4 Vitest tests, production build, 3 Playwright scenarios, and `git diff --check`.
 - 2026-08-28T18:35:54+08:00 [TOOL] Live readiness is green on revision `no-more-buckets-00010-rut`: health and UI return 200; runtime reports Gemini API `gemini-3.5-flash`, Firestore, Telegram, and a 600-second human-vendor timeout; `ATANoMoreBucketsbot` targets the correct webhook with zero pending updates and no last error; Cloud Tasks is RUNNING; and the revision has no error logs.
