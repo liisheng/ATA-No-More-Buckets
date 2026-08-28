@@ -509,11 +509,6 @@ def test_start_completion_evidence_and_tenant_buttons(monkeypatch, service):
     post(client, {"update_id": 24101, "callback_query": {"id": "prepare-2410", "data": f"vs:{session.session_id}:pr", "message": {"chat": {"id": 7202}}}})
     photo = post(client, {"update_id": 2411, "message": {"chat": {"id": 7202}, "photo": [{"file_id": "vendor-after"}]}})
     assert photo.json()["kind"] == "completion_photo"
-    image_records = [
-        record for record in service.list_communications(incident.incident_id)
-        if record.message_type == "image" and record.media_ids == ["vendor-after"]
-    ]
-    assert len(image_records) == 1
     post(client, {"update_id": 2412, "message": {"chat": {"id": 7202}, "text": "Replaced the failed sink seal and tested the joint."}})
     session = service.repository.get_vendor_session(session.session_id)
     assert session is not None
@@ -524,6 +519,12 @@ def test_start_completion_evidence_and_tenant_buttons(monkeypatch, service):
     post(client, {"update_id": 2414, "callback_query": {"id": "cs-2414", "data": f"vs:{session.session_id}:cs", "message": {"chat": {"id": 7202}}}})
     current = service.get_incident(incident.incident_id)
     assert current.status.value == "PROVISIONALLY_RESOLVED", current.last_evidence.blocking_reasons if current.last_evidence else None
+    image_records = [
+        record for record in service.list_communications(incident.incident_id)
+        if record.direction == "inbound" and record.sender_role == "vendor"
+        and record.message_type == "image" and record.media_ids == ["vendor-after"]
+    ]
+    assert len(image_records) == 1
     assert any("Still leaking" in str(message.reply_markup) for message in fake.messages)
     dry_now = post(
         client,

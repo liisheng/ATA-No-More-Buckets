@@ -475,11 +475,11 @@ class FirestoreIncidentRepository:
         )
 
     def add_vendor_telegram_user(self, vendor_id: str, telegram_user_id: str) -> None:
-        reference = self.reference_data.document(f"vendor-{vendor_id}")
-        snapshot = reference.get()
-        user_ids = set((snapshot.to_dict() or {}).get("authorized_telegram_user_ids", [])) if snapshot.exists else set()
-        user_ids.add(telegram_user_id)
-        reference.set({"authorized_telegram_user_ids": sorted(user_ids)}, merge=True)
+        from google.cloud.firestore_v1 import ArrayUnion
+
+        self.reference_data.document(f"vendor-{vendor_id}").set(
+            {"authorized_telegram_user_ids": ArrayUnion([telegram_user_id])}, merge=True
+        )
 
     def mark_telegram_delivery_ready(
         self, target_type: str, target_id: str, telegram_chat_id: str, started_at: datetime
