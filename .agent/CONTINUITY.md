@@ -35,6 +35,8 @@
 
 ## [PROGRESS]
 
+- 2026-08-29T01:33+08:00 [TOOL] Pushed verified commit `cade61e`, cancelled only the zero-traffic regional candidate build after it remained unassigned in Cloud Build, rebuilt the same source successfully in the global pool, staged revision `no-more-buckets-00016-gag` at zero traffic, verified it, and promoted it to 100%.
+
 - 2026-08-29T00:25+08:00 [CODE] Vendor Telegram allowlist persistence now uses Firestore ArrayUnion for concurrent-safe pairing updates. The completion-photo regression asserts exactly one inbound vendor image communication after Submit completion.
 
 - 2026-08-29T00:10+08:00 [CODE] Vendor group authorization now requires a persisted allowed Telegram sender ID in addition to the paired chat ID; pairing adds the sender to that vendor’s allowlist. Completion assessment reuses the inbound vendor photo communication instead of adding a second image card.
@@ -121,6 +123,8 @@
 - 2026-08-25T23:41+08:00 [TOOL] Pub/Sub publishing is part of the cloud adapter, but end-to-end push delivery to `/api/events/pubsub` additionally requires a push subscription; workflow progression itself uses Cloud Tasks and does not depend on that subscription.
 
 ## [OUTCOMES]
+
+- 2026-08-29T01:33+08:00 [TOOL] Guided vendor workflow release is live on `no-more-buckets-00016-gag`: public health/UI/Firestore reads pass; exact `gemini-3.5-flash` smoke passes; Telegram targets the public webhook with zero pending updates and no error; Cloud Tasks is RUNNING; the 600-second human-vendor timeout is active; candidate/public revision logs contain no errors; and local/remote `main` match at `cade61e`.
 
 - 2026-08-29T01:15+08:00 [CODE] Added a focused Firestore repository regression using a legacy-shaped vendor reference payload with `authorized_telegram_user_ids`; loading succeeds and preserves the paired Telegram chat metadata.
 - 2026-08-29T01:15+08:00 [TOOL] Backend regression/full suite passes at 95 passed/1 skipped; Ruff, mypy, and `git diff --check` pass. Amended local commit is `f606749`.
