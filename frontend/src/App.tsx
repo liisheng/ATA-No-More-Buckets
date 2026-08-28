@@ -140,12 +140,19 @@ function App() {
         }
         selectedIncidentId.current = selected.incident_id;
         setDraft(null);
-        const [current, nextCommunications, nextMedia] = await Promise.all([
+        const [incidentResult, communicationsResult, mediaResult] = await Promise.allSettled([
           api.incident(selected.incident_id), api.communications(selected.incident_id), api.media(selected.incident_id),
         ]);
         if (!active || replayRunningRef.current) return;
-        setIncident(current); setCommunications(nextCommunications); setMedia(nextMedia);
-        setError(draftsResult.status === "rejected" ? (draftsResult.reason instanceof Error ? draftsResult.reason.message : "Draft inspection failed") : "");
+        const errors: string[] = [];
+        if (incidentResult.status === "fulfilled") setIncident(incidentResult.value);
+        else errors.push(`Incident refresh failed: ${incidentResult.reason instanceof Error ? incidentResult.reason.message : "unknown error"}`);
+        if (communicationsResult.status === "fulfilled") setCommunications(communicationsResult.value);
+        else errors.push(`Communications refresh failed: ${communicationsResult.reason instanceof Error ? communicationsResult.reason.message : "unknown error"}`);
+        if (mediaResult.status === "fulfilled") setMedia(mediaResult.value);
+        else errors.push(`Media refresh failed: ${mediaResult.reason instanceof Error ? mediaResult.reason.message : "unknown error"}`);
+        if (draftsResult.status === "rejected") errors.push(`Draft inspection failed: ${draftsResult.reason instanceof Error ? draftsResult.reason.message : "unknown error"}`);
+        setError(errors.join(" · "));
       } catch (err) {
         if (active && !replayRunning) setError(err instanceof Error ? err.message : "Live update failed");
       }

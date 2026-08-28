@@ -27,6 +27,7 @@
 
 ## [PROGRESS]
 
+- 2026-08-28T19:41+08:00 [CODE] Independent live polling now settles incident, communications, and media detail requests separately; successful slices update immediately, failed slices retain prior state and report scoped errors.
 - 2026-08-28T19:27+08:00 [CODE] Fixed live control-room polling so the privacy-preserving draft endpoint is isolated from incident loading; only draft 404 responses become an empty list, while meaningful failures remain reportable.
 - 2026-08-28T19:03:21+08:00 [TOOL] Supersedes the 18:36 manual-test hold: independently verified Luna commit `f1bab93`, pushed it to `origin/main`, staged revision `no-more-buckets-00012-wiw` at zero traffic, verified the tagged frontend bundle/runtime/logs, then promoted it to 100%.
 - 2026-08-28T18:36:42+08:00 [CODE] Manual Telegram handoff remains withheld after post-release visual review found a frontend-only vendor countdown mismatch; revision `00010-rut` remains operational for backend/Telegram traffic while Luna prepares the correction.
@@ -90,6 +91,7 @@
 
 ## [OUTCOMES]
 
+- 2026-08-28T19:41+08:00 [TOOL] Verification for the detail-isolation follow-up passes: frontend lint, 9 Vitest tests, production build, 3 Playwright scenarios, backend 62 passed/1 skipped, Ruff, mypy, and `git diff --check`.
 - 2026-08-28T19:27+08:00 [TOOL] Frontend lint, 7 Vitest tests, production build, 3 Playwright scenarios, backend 62 passed/1 skipped, Ruff, mypy, and `git diff --check` pass for the live polling fix; commit pending.
 - 2026-08-28T19:03:21+08:00 [CODE] Vendor proof rows now derive Vendor A and Vendor B states independently, select the newest timeout schedule matching the pending vendor, prefer the attempt deadline, and show Vendor B's live human-response window as `MM:SS`.
 - 2026-08-28T19:03:21+08:00 [TOOL] Revision `no-more-buckets-00012-wiw` is live at 100% with the expected `index-Bg2KGTQ-.js` frontend, 600-second human-vendor timeout, healthy Telegram webhook with zero pending updates/no last error, RUNNING Cloud Tasks queue, and no revision error logs. Independent checks pass: backend 62 passed/1 skipped, Ruff, mypy, frontend ESLint, 4 Vitest tests, production build, 3 Playwright scenarios, and `git diff --check`.
