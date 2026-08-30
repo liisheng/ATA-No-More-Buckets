@@ -2,6 +2,8 @@
 
 ## [PLANS]
 
+- 2026-08-30T21:26:00+08:00 [USER] Correct tenant-facing vendor acceptance/ETA copy and add explicit Telegram acknowledgements for tenant closure; Luna should implement after Codex supplies the compact brief.
+
 - 2026-08-28T21:10+08:00 [USER] Replace the vendor's loosely typed command flow with a precise guided Telegram workflow: staged price and ETA collection, validation and explicit confirmation before submission, recovery paths for invalid input, and clear post-acceptance/start/completion attachment instructions. Codex will provide the implementation brief; Luna will implement later.
 
 - 2026-08-26T20:30+08:00 [USER] Prioritize a reliable live happy path that automatically contacts a vendor; defer escalation as a secondary demo concern. Codex must inspect the existing flow and obtain user decisions before generating Luna's consolidated prompt.
@@ -15,6 +17,8 @@
 - 2026-08-24T05:11+08:00 [CODE] Repository is effectively empty; implementation will be split into `backend/`, `frontend/`, `infra/`, `docs/`, and `.agent/`.
 
 ## [DECISIONS]
+
+- 2026-08-30T21:26:00+08:00 [ASSUMPTION] User-facing ETA timestamps should retain UTC internally but render in configurable `Asia/Singapore` display time using a 12-hour clock plus the vendor-supplied minute duration; tenant acceptance copy must not instruct the tenant to submit vendor data.
 
 - 2026-08-29T01:05+08:00 [USER] Vendor Telegram authorization uses the paired group/chat plus the exact persisted vendor session, incident, and assigned vendor; sender allowlists are retired, and legacy Firestore allowlist fields are ignored during reference loading for migration-free compatibility.
 - 2026-08-29T01:05+08:00 [CODE] Completion submission marks a vendor session `COMPLETED` and reports success only when the returned incident has passed evidence validation and reached `PROVISIONALLY_RESOLVED`; retryable evidence failures preserve the active incident and return the session to `AWAITING_PHOTO` with sanitized blocking guidance.
@@ -34,6 +38,9 @@
 - 2026-08-28T22:00+08:00 [CODE] Vendor Telegram intake now uses persisted VendorSession records with staged price/ETA confirmation, completion photo/summary review, ForceReply prompts, `/status`/`/help`/`/price`/`/eta`/`/cancel`, and non-submitting legacy combined-input compatibility.
 
 ## [PROGRESS]
+
+- 2026-08-30T21:33:45+08:00 [CODE] Implemented focused tenant-notification corrections: validated `DISPLAY_TIMEZONE` (default `Asia/Singapore`), persisted vendor ETA minutes, shared 12-hour local ETA formatting, corrected acceptance copy, centralized tenant/vendor closure acknowledgements with stable notification keys, and repeated Dry now callback handling.
+- 2026-08-30T21:33:45+08:00 [TOOL] Backend full pytest, Ruff, mypy, frontend lint/Vitest/build, Playwright happy path, and `git diff --check` pass locally. No deployment, push, pairing, secret, model, or cloud-resource changes performed.
 
 - 2026-08-29T01:33+08:00 [TOOL] Pushed verified commit `cade61e`, cancelled only the zero-traffic regional candidate build after it remained unassigned in Cloud Build, rebuilt the same source successfully in the global pool, staged revision `no-more-buckets-00016-gag` at zero traffic, verified it, and promoted it to 100%.
 
@@ -76,6 +83,10 @@
 - 2026-08-24T05:46+08:00 [CODE] Final local smoke, Pub/Sub invalid-incident handling, and three Playwright scenarios pass after the last backend hardening change.
 
 ## [DISCOVERIES]
+
+- 2026-08-30T21:26:00+08:00 [TOOL] Live incident `inc_3aa909d7a31b` reached `CLOSED` after the first of four recorded tenant `Dry now` callbacks, but no outbound closure acknowledgement was persisted for tenant or vendor. The callback handler only records/processes/answers without response text, and `tenant_confirm` transitions state without notifying either party. Tenant ETA communications also expose raw UTC ISO text and vendor acceptance says `Reply ETA <minutes>` even though ETA is collected from the vendor wizard.
+
+- 2026-08-30T21:20:00+08:00 [TOOL] Live vendor test for `inc_3aa909d7a31b` confirms Telegram group-privacy behavior: Cloud Run received buttons and `/price`/`/eta` commands through `AWAITING_PHOTO`, but Telegram delivered neither a standalone `200` nor a standalone completion photo to the webhook. Wizard text/media must use Telegram's Reply action on the current bot prompt; quote/ETA also have `/price` and `/eta` command fallbacks.
 
 - 2026-08-29T00:45+08:00 [TOOL] The follow-up vendor build cannot yet be deployed: the live Firestore Vendor B reference is paired but has no `authorized_telegram_user_ids` field/value, while the new webhook strictly ignores every vendor message/callback whose sender is not allowlisted. The paired group is the intended vendor principal; sender-level allowlisting was not requested and has no backward-compatible bootstrap path.
 - 2026-08-29T00:45+08:00 [CODE] `submit_completion` still marks the vendor session `COMPLETED` and sends “evidence passed” after any `process_action` result, even when the evidence gate returns an `ESCALATED` incident with `last_evidence.passed == false`. This removes the retry path and sends a false success message. The requested sequential-session and failing-evidence wizard regressions are also absent from the integration suite.

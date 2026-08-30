@@ -357,6 +357,7 @@ class Incident(StrictModel):
     approval: ApprovalRequest | None = None
     last_evidence: EvidenceAssessment | None = None
     eta: datetime | None = None
+    eta_minutes: int | None = Field(default=None, ge=1, le=1440)
     warranty_expires_at: datetime | None = None
     closure_reason: str | None = None
     created_at: datetime

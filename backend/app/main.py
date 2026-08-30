@@ -795,6 +795,7 @@ def telegram_webhook(
                 provider_message_id=provider_message_id,
                 delivery_status="received",
             )
+            was_closed = confirmation.status.value == "CLOSED"
             service.process_action(
                 confirmation.incident_id,
                 ActionRequest(
@@ -802,10 +803,14 @@ def telegram_webhook(
                     event_id=f"telegram-action-{update_id}",
                 ),
             )
-            if hasattr(service.notifications, "answer_callback") and isinstance(
-                callback.get("id"), str
-            ):
-                service.notifications.answer_callback(callback["id"])
+            if parts[2] == "dry":
+                _answer_callback(
+                    callback.get("id"),
+                    "This incident is already closed." if was_closed else "Repair confirmed — incident closed.",
+                    was_closed,
+                )
+            else:
+                _answer_callback(callback.get("id"))
             return {
                 "status": "processed",
                 "kind": "tenant_confirmation" if parts[2] == "dry" else "warranty_recurrence",

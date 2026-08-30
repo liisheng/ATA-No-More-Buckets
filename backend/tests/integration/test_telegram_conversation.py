@@ -21,15 +21,17 @@ class FakeTelegram:
 
     def __init__(self) -> None:
         self.messages: list[NotificationMessage] = []
-        self.callback_answers: list[str] = []
+        self.callback_answers: list[tuple[str, str | None, bool]] = []
         self.media_sources: dict[str, str] = {}
 
     def send(self, message: NotificationMessage) -> str:
         self.messages.append(message)
         return f"telegram:{len(self.messages)}"
 
-    def answer_callback(self, callback_id: str) -> None:
-        self.callback_answers.append(callback_id)
+    def answer_callback(
+        self, callback_id: str, text: str | None = None, show_alert: bool = False
+    ) -> None:
+        self.callback_answers.append((callback_id, text, show_alert))
 
     def download_media(self, file_id: str, **kwargs):
         source = str(kwargs.get("source", "tenant"))
@@ -545,6 +547,38 @@ def test_start_completion_evidence_and_tenant_buttons(monkeypatch, service):
     )
     assert dry_now.json()["kind"] == "tenant_confirmation"
     assert service.get_incident(incident.incident_id).status.value == "CLOSED"
+    assert fake.callback_answers[-1] == (
+        "dry-now-2415", "Repair confirmed — incident closed.", False
+    )
+    outbound_count = len(
+        [record for record in service.list_communications(incident.incident_id) if record.direction == "outbound"]
+    )
+    repeated = post(
+        client,
+        {
+            "update_id": 2416,
+            "callback_query": {
+                "id": "dry-now-repeat-2416",
+                "data": f"tenant:{incident.incident_id}:dry",
+                "message": {"chat": {"id": 7101}},
+            },
+        },
+    )
+    assert repeated.status_code == 200
+    assert fake.callback_answers[-1] == (
+        "dry-now-repeat-2416", "This incident is already closed.", True
+    )
+    assert len(
+        [record for record in service.list_communications(incident.incident_id) if record.direction == "outbound"]
+    ) == outbound_count
+    text_repeat = post(
+        client,
+        {"update_id": 2417, "message": {"chat": {"id": 7101}, "text": "confirmed"}},
+    )
+    assert text_repeat.json()["kind"] == "tenant_confirmation"
+    assert len(
+        [record for record in service.list_communications(incident.incident_id) if record.direction == "outbound"]
+    ) == outbound_count
 
 
 def test_completion_final_price_edit_confirm_submit(monkeypatch, service):

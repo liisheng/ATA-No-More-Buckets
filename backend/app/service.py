@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from typing import Any, Literal
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 import structlog
 
@@ -67,6 +68,28 @@ ContactMessageType = Literal["text", "image", "video", "audio", "button", "invoi
 
 def _safe_contact_text(value: str | None, max_length: int = 4000) -> str:
     return sanitize_contact_text(value, max_length)
+
+
+def format_tenant_eta(
+    eta: datetime,
+    duration_minutes: int | None,
+    display_timezone: str,
+    now: datetime | None = None,
+) -> str:
+    """Format an arrival for tenants without exposing UTC or ISO timestamps."""
+
+    local_eta = eta.astimezone(ZoneInfo(display_timezone))
+    hour = local_eta.hour % 12 or 12
+    clock = f"{hour}:{local_eta.minute:02d} {'AM' if local_eta.hour < 12 else 'PM'}"
+    today = (now or datetime.now(UTC)).astimezone(ZoneInfo(display_timezone)).date()
+    if local_eta.date() == today:
+        day = ""
+    elif local_eta.date() == today + timedelta(days=1):
+        day = "Tomorrow, "
+    else:
+        day = f"{local_eta:%b} {local_eta.day}, "
+    duration = f" ({duration_minutes} minutes)" if duration_minutes is not None else ""
+    return f"{day}{clock}{duration}"
 
 
 class IncidentNotFound(KeyError):
@@ -959,14 +982,9 @@ class IncidentService:
             self._transition(
                 incident, IncidentStatus.SCHEDULED, "VENDOR_ACCEPTED_ELIGIBLE", event_id
             )
-        eta_message = (
-            f" ETA: {incident.eta.isoformat()}."
-            if incident.eta
-            else " Reply ETA <minutes> when the arrival time is confirmed."
-        )
         self._notify(
             incident,
-            f"{vendor.name} accepted the bounded repair.{eta_message}",
+            f"{vendor.name} accepted your repair request. They’re confirming the arrival time now.",
             f"vendor-accepted:{vendor.vendor_id}",
         )
 
@@ -1725,9 +1743,26 @@ class IncidentService:
                 if not 1 <= minutes <= 1440:
                     raise ValueError("ETA must be between 1 and 1440 minutes")
                 incident.eta = self.clock.now() + timedelta(minutes=minutes)
+                incident.eta_minutes = minutes
+            vendor = next(
+                (candidate for candidate in self.vendors if candidate.vendor_id == incident.assigned_vendor_id),
+                None,
+            )
+            eta_text = (
+                format_tenant_eta(
+                    incident.eta,
+                    incident.eta_minutes,
+                    self.settings.display_timezone,
+                    self.clock.now(),
+                )
+                if incident.eta
+                else "being confirmed"
+            )
             self._notify(
                 incident,
-                f"Your plumber ETA is {incident.eta.isoformat() if incident.eta else 'being confirmed'}.",
+                "🕒 Plumber ETA\n\n"
+                f"ETA: {eta_text}\n"
+                f"Vendor: {vendor.name if vendor else 'Assigned vendor'}",
                 "eta-update",
             )
         elif action == "work_started":
@@ -1782,6 +1817,24 @@ class IncidentService:
                 self._timeline(
                     incident, "incident_closed", "CLOSURE_GATE_PASSED", event_id=request.event_id
                 )
+                self._notify(
+                    incident,
+                    "✅ Repair confirmed\n\n"
+                    f"Thanks — the repair has been marked dry and incident {incident.incident_id} is now closed.",
+                    "tenant-closure-confirmed",
+                )
+                vendor = next(
+                    (candidate for candidate in self.vendors if candidate.vendor_id == incident.assigned_vendor_id),
+                    None,
+                )
+                if vendor:
+                    self._notify_vendor(
+                        incident,
+                        vendor,
+                        "✅ Job completed\n\n"
+                        f"The tenant confirmed the repair is dry. Incident {incident.incident_id} is now closed.",
+                        "vendor-closure-confirmed",
+                    )
             else:
                 self._timeline(
                     incident,

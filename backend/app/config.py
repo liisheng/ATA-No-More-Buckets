@@ -1,6 +1,7 @@
 import re
 from functools import lru_cache
 from typing import Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -66,6 +67,7 @@ class Settings(BaseSettings):
     tenant_confirmation_delay_seconds: int = Field(
         default=15, validation_alias="TENANT_CONFIRMATION_DELAY_SECONDS"
     )
+    display_timezone: str = Field(default="Asia/Singapore", validation_alias="DISPLAY_TIMEZONE")
     demo_warranty_period_seconds: int = Field(
         default=30, validation_alias="DEMO_WARRANTY_RECURRENCE_DELAY_SECONDS"
     )
@@ -89,6 +91,15 @@ class Settings(BaseSettings):
             and (value.startswith("@") or not re.fullmatch(r"[A-Za-z0-9_]{5,32}", value))
         ):
             raise ValueError("TELEGRAM_BOT_USERNAME must be a username without @")
+        return value
+
+    @field_validator("display_timezone")
+    @classmethod
+    def validate_display_timezone(cls, value: str) -> str:
+        try:
+            ZoneInfo(value)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise ValueError(f"DISPLAY_TIMEZONE must be a valid IANA timezone: {value}") from exc
         return value
 
     @field_validator("spending_limit_default", "currency")
