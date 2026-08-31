@@ -2,6 +2,8 @@
 
 ## [PLANS]
 
+- 2026-08-30T21:40:00+08:00 [USER] Prepare the exact final demo/recording flow across tenant Telegram, live web control room, and vendor Telegram, including what to show, say, click, and expect at every stage.
+
 - 2026-08-30T21:26:00+08:00 [USER] Correct tenant-facing vendor acceptance/ETA copy and add explicit Telegram acknowledgements for tenant closure; Luna should implement after Codex supplies the compact brief.
 
 - 2026-08-28T21:10+08:00 [USER] Replace the vendor's loosely typed command flow with a precise guided Telegram workflow: staged price and ETA collection, validation and explicit confirmation before submission, recovery paths for invalid input, and clear post-acceptance/start/completion attachment instructions. Codex will provide the implementation brief; Luna will implement later.
@@ -17,6 +19,8 @@
 - 2026-08-24T05:11+08:00 [CODE] Repository is effectively empty; implementation will be split into `backend/`, `frontend/`, `infra/`, `docs/`, and `.agent/`.
 
 ## [DECISIONS]
+
+- 2026-08-30T21:40:00+08:00 [ASSUMPTION] The final demo will use three capture surfaces (tenant private bot chat, live web control room, dedicated vendor group) and one real happy-path incident under S$250; the web app is an observational proof layer while all human actions occur in Telegram.
 
 - 2026-08-30T21:26:00+08:00 [ASSUMPTION] User-facing ETA timestamps should retain UTC internally but render in configurable `Asia/Singapore` display time using a 12-hour clock plus the vendor-supplied minute duration; tenant acceptance copy must not instruct the tenant to submit vendor data.
 
@@ -38,6 +42,8 @@
 - 2026-08-28T22:00+08:00 [CODE] Vendor Telegram intake now uses persisted VendorSession records with staged price/ETA confirmation, completion photo/summary review, ForceReply prompts, `/status`/`/help`/`/price`/`/eta`/`/cancel`, and non-submitting legacy combined-input compatibility.
 
 ## [PROGRESS]
+
+- 2026-09-01T01:22:29+08:00 [TOOL] Independently reviewed and verified Luna commit `039a7a4`, pushed it to `origin/main`, built immutable image digest `sha256:e3391cf744b98663510351bed02ba2a8d914628440b6ff749369b02e666706ac`, staged Cloud Run revision `no-more-buckets-00012-x6f` at zero traffic, verified it, and promoted it to 100%.
 
 - 2026-08-30T21:33:45+08:00 [CODE] Implemented focused tenant-notification corrections: validated `DISPLAY_TIMEZONE` (default `Asia/Singapore`), persisted vendor ETA minutes, shared 12-hour local ETA formatting, corrected acceptance copy, centralized tenant/vendor closure acknowledgements with stable notification keys, and repeated Dry now callback handling.
 - 2026-08-30T21:33:45+08:00 [TOOL] Backend full pytest, Ruff, mypy, frontend lint/Vitest/build, Playwright happy path, and `git diff --check` pass locally. No deployment, push, pairing, secret, model, or cloud-resource changes performed.
@@ -134,6 +140,8 @@
 - 2026-08-25T23:41+08:00 [TOOL] Pub/Sub publishing is part of the cloud adapter, but end-to-end push delivery to `/api/events/pubsub` additionally requires a push subscription; workflow progression itself uses Cloud Tasks and does not depend on that subscription.
 
 ## [OUTCOMES]
+
+- 2026-09-01T01:22:29+08:00 [TOOL] Tenant notification correction release is live on `no-more-buckets-00012-x6f`: public health/Firestore reads pass; runtime reports Cloud Run, Telegram, Firestore, and exact `gemini-3.5-flash`; live Gemini structured smoke passes; Telegram webhook has zero pending updates/no error; Cloud Tasks is RUNNING; and the active revision has no error logs. Independent checks pass: backend pytest, Ruff, mypy, frontend lint, 14 Vitest tests, production build, 3 Playwright scenarios, and `git diff --check`.
 
 - 2026-08-29T01:33+08:00 [TOOL] Guided vendor workflow release is live on `no-more-buckets-00016-gag`: public health/UI/Firestore reads pass; exact `gemini-3.5-flash` smoke passes; Telegram targets the public webhook with zero pending updates and no error; Cloud Tasks is RUNNING; the 600-second human-vendor timeout is active; candidate/public revision logs contain no errors; and local/remote `main` match at `cade61e`.
 
