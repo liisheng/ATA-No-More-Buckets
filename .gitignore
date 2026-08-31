@@ -13,4 +13,7 @@ node_modules/
 frontend/dist/
 playwright-report/
 test-results/
+*.mp4
+*.mov
+*.webm
 .DS_Store

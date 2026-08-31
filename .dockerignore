@@ -8,3 +8,10 @@ backend/__pycache__
 backend/.pytest_cache
 playwright-report
 test-results
+*.mp4
+*.mov
+*.webm
+.venv
+.pytest_cache
+.mypy_cache
+.ruff_cache

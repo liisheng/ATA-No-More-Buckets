@@ -1,13 +1,44 @@
-# Four-minute demo script
+# Short live demo flow
 
-The console compresses timing while preserving the production workflow logic. The top bar visibly says **DEMO CLOCK ENABLED**. The configured demo timers are Vendor A urgent timeout 8s, routine timeout 12s, tenant confirmation 15s, and warranty recurrence 30s.
+The live demonstration uses the public Cloud Run application, one paired tenant chat, and one paired Vendor B group. Vendor A is a deterministic timeout so the fallback is repeatable.
 
-1. Open the console and leave the primary screen waiting. It visibly says **LIVE BACKEND FEED** and **DEMO CLOCK ENABLED** when demo mode is active; there is no automatic workflow replay.
-2. Send `/start` to the Telegram bot from the paired synthetic tenant, then send `/report` followed by text, a photo, a normal video, and/or a voice note. The console first shows **INCOMING REPORT DRAFT**, ordered text/captions, media thumbnails/video/audio controls, durations, sender/recipient, Telegram channel, timestamps, delivery states, and **Transcript pending**. Use **➕ Add / edit items** once to show the attachment instructions, then submit with **✅ Submit report**.
-3. Point at the agent lane: Gemini’s schema-validated `ReportAssessment` is shown beside the deterministic state, property-specific under-sink containment, S$250 cap, and persisted scheduler/contact records. The timeline separately shows `REPORTED → TRIAGED → CONTAINED` and rule IDs.
-4. Show the visible Vendor A 8-second urgent (or 12-second routine) countdown, timeout, and autonomous Vendor B fallback. Explain that a late Vendor A acceptance cannot replace the assigned Vendor B. In Telegram, Vendor B accepts, replies with a quote, confirms it, replies with an ETA, confirms it, reviews, and taps **Submit quote and ETA**. Only then does **Start job** appear.
-5. Tap **Start job**, then **Prepare completion**. Send one after-photo, send a 10–500 character work summary, review the default final price, and tap **Submit completion**. Show the completion image, evidence gate, delayed confirmation, then tap **Dry now** or **Still leaking**. The primary console does not fabricate ETA, work-start, completion, or tenant-confirm contacts; each appears only after the real Telegram/backend event.
-6. Point at the proof strip for Cloud Run/Gemini/Firestore adapter execution. In local mode, it explicitly says local container/deterministic/memory; in GCP mode, the same fields show Cloud Run/Gemini 3.5 Flash/Firestore and Pub/Sub + Cloud Tasks. Cloud Run uses **LIVE CLOCK** and has no replay/reset/safety-exception controls.
-7. For offline judging or regression checks only, run the local app and use the secondary **Replay deterministic scenario** button. It uses isolated local adapters and includes the timeout, Vendor B quote/ETA, evidence, and tenant confirmation steps.
+## Before recording
 
-Exception path to rehearse: submit text containing `electrical` or a quote above the property cap. The service produces a narrow `ESCALATED` timeline entry and does not dispatch.
+- Open the public `.run.app` URL and confirm it shows **Waiting for a real tenant report**.
+- Send `/start` in the paired tenant chat and Vendor B group.
+- Prepare one leak photo and one after-repair photo.
+- Use Telegram's **Reply** action for every vendor price, ETA, photo, and summary prompt.
+
+## Steps
+
+1. In the tenant chat, send `/report`.
+2. Send a safe leak description, one photo, and a voice note. Tap **✅ Submit report** on the newest draft summary.
+3. On the website, show the tenant evidence, Gemini assessment, containment instructions, S$250 work order, and persisted timeline.
+4. Wait for Vendor A's 8 or 12 second deadline. Show the automatic Vendor B fallback.
+5. In the Vendor B group:
+   - Tap **Accept**.
+   - Reply `220` to the quote prompt.
+   - Tap **Confirm S$220.00**.
+   - Reply `20` to the ETA prompt.
+   - Tap **Confirm 20 minutes**.
+   - Tap **Submit quote and ETA**.
+6. Show the tenant's automatic vendor and ETA updates.
+7. In the Vendor B group:
+   - Tap **Start job**.
+   - Tap **Prepare completion**.
+   - Reply to the photo prompt with the after-repair photo.
+   - Reply to the summary prompt with a 10 to 500 character repair summary.
+   - Tap **Confirm S$220.00**.
+   - Tap **Submit completion**.
+8. On the website, show the completion photo, final price, evidence result, and delayed tenant-confirmation task.
+9. In the tenant chat, tap **Dry now**.
+10. On the website, show the final `CLOSED` state and Cloud Run, Gemini 3.5 Flash, and Firestore proof.
+
+## Important behavior
+
+- The public console does not expose unfinished Telegram drafts. Tenant evidence appears after submission.
+- The agent does not invent vendor acceptance, quote, ETA, work start, completion, or tenant confirmation.
+- A late Vendor A response cannot replace Vendor B.
+- Prices above S$250 require approval.
+- **Still leaking** reopens the same incident during its warranty window.
+- Local deterministic replay is only for development and judging fallback. It is hidden in the Cloud Run deployment.

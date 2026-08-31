@@ -2,6 +2,12 @@
 
 ## [PLANS]
 
+- 2026-09-01T06:42+08:00 [USER] Prepare the repository for judging: discard the unshipped visual redesign, keep the deployed interface, remove repository clutter, and provide clone-to-local plus bring-your-own Google Cloud, Gemini, and Telegram setup instructions.
+
+- 2026-09-01T03:05:00+08:00 [USER] Replace the prior demo outline with a literal word-for-word recording script containing exact narration, Telegram inputs/buttons, screen switches, wait gates, expected UI evidence, and safe timing fallbacks.
+
+- 2026-09-01T02:02:18+08:00 [USER] Delegate a frontend-only visual refinement to Luna so the live control room looks intentionally designed and credible for judging while preserving all existing workflow behavior.
+
 - 2026-08-30T21:40:00+08:00 [USER] Prepare the exact final demo/recording flow across tenant Telegram, live web control room, and vendor Telegram, including what to show, say, click, and expect at every stage.
 
 - 2026-08-30T21:26:00+08:00 [USER] Correct tenant-facing vendor acceptance/ETA copy and add explicit Telegram acknowledgements for tenant closure; Luna should implement after Codex supplies the compact brief.
@@ -19,6 +25,11 @@
 - 2026-08-24T05:11+08:00 [CODE] Repository is effectively empty; implementation will be split into `backend/`, `frontend/`, `infra/`, `docs/`, and `.agent/`.
 
 ## [DECISIONS]
+
+- 2026-09-01T06:42+08:00 [USER] The unshipped `294b6b0` frontend redesign is not part of the judging release. The large local MP4 recording remains untracked and ignored; no credential or local `.env` file may be committed.
+- 2026-09-01T06:42+08:00 [CODE] The root quick start is credential-free using deterministic, memory, and local adapters. Live deployment setup uses each operator's own Google Cloud project, Gemini API key, Telegram bot, and webhook secret stored in Secret Manager.
+
+- 2026-09-01T02:02:18+08:00 [ASSUMPTION] Redesign direction is a restrained professional maintenance-operations console: compact application header, incident-first hierarchy, fewer decorative cards/badges/icons, semantic status color, and progressive disclosure for technical audit metadata. No backend/API/workflow copy or Telegram behavior changes are in scope.
 
 - 2026-08-30T21:40:00+08:00 [ASSUMPTION] The final demo will use three capture surfaces (tenant private bot chat, live web control room, dedicated vendor group) and one real happy-path incident under S$250; the web app is an observational proof layer while all human actions occur in Telegram.
 
@@ -42,6 +53,17 @@
 - 2026-08-28T22:00+08:00 [CODE] Vendor Telegram intake now uses persisted VendorSession records with staged price/ETA confirmation, completion photo/summary review, ForceReply prompts, `/status`/`/help`/`/price`/`/eta`/`/cancel`, and non-submitting legacy combined-input compatibility.
 
 ## [PROGRESS]
+
+- 2026-09-01T06:42+08:00 [CODE] Reworked judge-facing documentation around the Taskmaster workflow, proof shown in the demo, concise architecture, deterministic Docker/source startup, exact recording flow, and a two-stage Cloud Run deployment from a fresh project. Added media-recording ignores and corrected the Makefile mypy working directory.
+- 2026-09-01T06:42+08:00 [TOOL] Credential scan found no tracked API key, bot token, private key, local `.env`, or machine-specific path. Backend Ruff, 102-test pytest suite, and mypy pass; frontend ESLint, 14 Vitest tests, production build, and 3 Playwright scenarios pass. Docker build remains blocked only because the local Docker Desktop Linux engine is unavailable.
+
+- 2026-09-01T02:43:08+08:00 [CODE] Visual QA found and corrected a narrow mobile header collision at 360px by allowing the application header/status row to wrap; the mobile waiting state now remains readable without horizontal overflow.
+
+- 2026-09-01T02:38:57+08:00 [CODE] Replaced the frontend control-room presentation with a compact incident-first operations console: agent workflow is primary, tenant/vendor communications are operational streams, audit and guardrails remain separate, and technical IDs use progressive disclosure. Backend/API/workflow/polling/replay behavior is unchanged.
+
+- 2026-09-01T02:38:57+08:00 [TOOL] Frontend lint, production build, two consecutive 16-test Vitest runs, three Playwright scenarios, backend pytest, Ruff, ignore-missing-imports mypy, browser breakpoint QA, and git diff checks pass. Standard mypy remains blocked only by missing `google.protobuf` stubs; the Docker build remains blocked only by the unavailable local Docker Desktop Linux engine. No push or deployment was performed.
+
+- 2026-09-01T02:02:18+08:00 [TOOL] Audited the deployed desktop control room and delegated the frontend-only visual refinement to the existing Luna task with explicit behavior-preservation, responsive, accessibility, testing, commit-only, and no-deployment constraints. Luna is actively implementing; no application commit or release exists yet.
 
 - 2026-09-01T01:22:29+08:00 [TOOL] Independently reviewed and verified Luna commit `039a7a4`, pushed it to `origin/main`, built immutable image digest `sha256:e3391cf744b98663510351bed02ba2a8d914628440b6ff749369b02e666706ac`, staged Cloud Run revision `no-more-buckets-00012-x6f` at zero traffic, verified it, and promoted it to 100%.
 
@@ -89,6 +111,10 @@
 - 2026-08-24T05:46+08:00 [CODE] Final local smoke, Pub/Sub invalid-incident handling, and three Playwright scenarios pass after the last backend hardening change.
 
 ## [DISCOVERIES]
+
+- 2026-09-01T02:48:55+08:00 [CODE] UI candidate `294b6b0` has three release-gate presentation defects: chronological conversation lists are capped in nested scroll areas without following new events, so live quote/ETA/completion messages remain off-screen; `CLOSED` leaves Tenant confirmation visually active while `ESCALATED`/`CANCELLED` mark the whole rail blocked without preserving achieved stages; and the vendor-status component labels an absent Vendor A attempt as awaiting response while styling timed-out Vendor A with the positive accent.
+
+- 2026-09-01T02:48:55+08:00 [TOOL] Independent review otherwise confirms the frontend-only scope and a materially improved incident-first visual hierarchy. Frontend lint, two consecutive 16-test Vitest runs, production build, backend pytest/Ruff/configured mypy, 3 Playwright scenarios, commit whitespace check, and populated/waiting browser inspection pass.
 
 - 2026-08-30T21:26:00+08:00 [TOOL] Live incident `inc_3aa909d7a31b` reached `CLOSED` after the first of four recorded tenant `Dry now` callbacks, but no outbound closure acknowledgement was persisted for tenant or vendor. The callback handler only records/processes/answers without response text, and `tenant_confirm` transitions state without notifying either party. Tenant ETA communications also expose raw UTC ISO text and vendor acceptance says `Reply ETA <minutes>` even though ETA is collected from the vendor wizard.
 
@@ -140,6 +166,15 @@
 - 2026-08-25T23:41+08:00 [TOOL] Pub/Sub publishing is part of the cloud adapter, but end-to-end push delivery to `/api/events/pubsub` additionally requires a push subscription; workflow progression itself uses Cloud Tasks and does not depend on that subscription.
 
 ## [OUTCOMES]
+
+- 2026-09-01T03:25:00+08:00 [USER] Authorized another clean-slate reset and requested a much shorter step-by-step recording script.
+- 2026-09-01T03:25:00+08:00 [TOOL] Removed sole active synthetic incident `inc_3e4fcb5da478`, related vendor session `vs_e97cf7e772f449778d81`, and pending Vendor B timeout `vendor-timeout-1b520b9632c5f97424b614a9`; public incident API returns `[]`.
+
+- 2026-09-01T03:15:00+08:00 [USER] Authorized another recording reset to the live waiting state.
+- 2026-09-01T03:15:00+08:00 [TOOL] Dry-run identified the sole active synthetic incident `inc_911e9207de2c`, its active Vendor B session `vs_2b8780a7287b45389cb1`, and scheduled timeout task `vendor-timeout-9fab6c47e1b207f5e0d31455`. Deleted only those three scoped records; the task is absent, the public incident API returns `[]`, and browser verification shows `Waiting for a real tenant report`. Pairings, vendors, configuration, and unrelated records remain untouched.
+
+- 2026-09-01T02:55:00+08:00 [USER] Authorized clearing the live synthetic incident history so the public console returns to its waiting state for recording.
+- 2026-09-01T02:55:00+08:00 [TOOL] After an exact seven-document dry run confirmed every live incident belonged to `tenant-demo-001` at `demo-tampines-101`, deleted only those seven Firestore `incidents` documents. The public incident API now returns `[]`, the deployed website returns 200 and visibly shows `Waiting for a real tenant report`; Telegram pairing, vendor/reference data, configuration, and audit/media records were not modified.
 
 - 2026-09-01T01:22:29+08:00 [TOOL] Tenant notification correction release is live on `no-more-buckets-00012-x6f`: public health/Firestore reads pass; runtime reports Cloud Run, Telegram, Firestore, and exact `gemini-3.5-flash`; live Gemini structured smoke passes; Telegram webhook has zero pending updates/no error; Cloud Tasks is RUNNING; and the active revision has no error logs. Independent checks pass: backend pytest, Ruff, mypy, frontend lint, 14 Vitest tests, production build, 3 Playwright scenarios, and `git diff --check`.
 

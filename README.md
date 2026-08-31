@@ -1,141 +1,154 @@
 # No More Buckets
 
-No More Buckets is a Google All Things Agentic Hackathon submission: a bounded incident coordinator for plumbing leaks in small rental properties. It turns a tenant text, image, and/or voice note into an auditable workflow that contains the leak, creates a capped work order, dispatches a qualified vendor, recovers from vendor failure, coordinates access/ETA, verifies completion evidence, waits for tenant confirmation, and reopens a recurrence under warranty.
+No More Buckets is an autonomous repair coordinator for small landlords and property managers. A tenant reports a leak through Telegram with text, a photo, video, or a voice note. The system assesses the report, sends safe containment instructions, creates a bounded work order, contacts vendors, tracks the repair, checks completion evidence, and asks the tenant to confirm the result.
 
-The product boundary is intentionally narrow. Gemini 3.5 Flash extracts schema-validated observable facts. Deterministic Python policies authorize safety actions, spending, access, vendor eligibility, retries, evidence gating, and closure. Tenant/vendor/media/invoice content is untrusted and never supplies policy instructions.
+**Live application:** [https://no-more-buckets-qzrxxtlpgq-uc.a.run.app](https://no-more-buckets-qzrxxtlpgq-uc.a.run.app)
 
-Telegram Bot API is the primary MVP messaging provider. It accepts tenant text, photos, videos, and voice notes; sends containment and status updates; and dispatches vendors into a persisted, step-by-step Accept → quote confirmation → ETA confirmation → final submission wizard. Twilio remains an optional adapter only and is not on the critical path. Every Telegram user must send `/start` to the bot before receiving outbound messages.
+The live deployment uses synthetic tenants, properties, vendors, and repair evidence.
 
-## Quick start
+## Why this is a Taskmaster agent
 
-The reproducible path uses the multi-stage container and deterministic adapters; it needs no cloud credentials and only synthetic data.
+This is not a chatbot. It completes a long-running workflow across a tenant, an agent, and a vendor:
+
+1. Accept a multimodal maintenance report.
+2. Use Gemini 3.5 Flash to extract structured observations.
+3. Apply deterministic safety, access, spending, and dispatch rules.
+4. Send property-specific containment instructions.
+5. Create a work order capped at S$250.
+6. Contact Vendor A and automatically fall back to Vendor B after timeout or decline.
+7. Collect and confirm the vendor quote and arrival time.
+8. Record work start and collect an after-photo, work summary, and final price.
+9. Check the evidence before asking the tenant to confirm the repair.
+10. Close the incident, or reopen it if the leak returns during warranty.
+
+Only real human checkpoints require a human response. The system handles the coordination between them and records every important action.
+
+## Proof shown in the demo
+
+- A real Telegram tenant report containing text, an image, and a voice note
+- Gemini 3.5 Flash structured assessment
+- Property-specific containment instructions
+- A bounded S$250 work order
+- Vendor A timeout and automatic Vendor B fallback
+- Guided quote and ETA validation
+- Vendor completion evidence and final-price confirmation
+- Delayed tenant confirmation
+- A persisted Firestore audit timeline
+- The public Cloud Run URL and runtime metadata
+
+## Architecture
+
+```mermaid
+flowchart LR
+  T[Tenant Telegram report] --> API[FastAPI webhook on Cloud Run]
+  API --> G[Gemini 3.5 Flash<br/>structured observations]
+  API --> M[Cloud Storage<br/>media]
+  G --> P[Deterministic policy boundary]
+  P --> S[Explicit incident state machine]
+  S --> V[Telegram vendor workflow]
+  S --> F[Firestore<br/>state + communications + audit]
+  S --> Q[Cloud Tasks<br/>timeouts + delayed follow-up]
+  S --> E[Pub/Sub<br/>event envelopes]
+  Q --> S
+```
+
+Gemini can describe what it observes, but it cannot authorize spending, dispatch, safety exceptions, or closure. Those decisions are made by testable Python policies with rule IDs.
+
+The full trust-boundary and persistence design is in [docs/architecture.md](docs/architecture.md).
+
+## Technology
+
+- Gemini 3.5 Flash through the Google GenAI SDK
+- Google ADK with a narrow tool boundary
+- Python 3.12, FastAPI, Pydantic
+- React, TypeScript, Vite
+- Cloud Run, Firestore, Cloud Tasks, Cloud Storage, Pub/Sub, Secret Manager
+- Telegram Bot API
+- Docker
+
+## Run locally with Docker
+
+This is the simplest reproducible path. It uses deterministic adapters, in-memory storage, and synthetic data. No cloud credentials are required.
 
 ```powershell
 docker build -t no-more-buckets:local .
 docker run --rm -p 8080:8080 --env-file .env.example no-more-buckets:local
 ```
 
-Open [http://localhost:8080](http://localhost:8080). The primary screen is a live incident control room: it waits for a real backend report and polls persisted incident, communication, and media records without a refresh. **Replay deterministic scenario** is a secondary button for a repeatable end-to-end fallback/evidence demo; it does not represent the primary live experience. Demo time is compressed, but the same service/state machine logic records the same timeline and guardrails. A local source run is also possible with Python 3.12 and Node 22+. Use two terminals so the API and Vite console run together:
+Open [http://localhost:8080](http://localhost:8080) and select **Replay deterministic scenario**. The replay uses the same state machine, policy, timeout, fallback, evidence, and closure logic as the live workflow.
+
+## Run locally from source
+
+Requirements: Python 3.12 and Node.js 22 or newer.
 
 ```powershell
-# Terminal 1: credential-free deterministic API
-$env:MESSAGING_PROVIDER = "local"
-$env:STORAGE_BACKEND = "memory"
-$env:FACTS_PROVIDER = "deterministic"
-$env:ADK_ENABLED = "false"
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r backend/requirements-dev.txt
-python -m uvicorn app.main:app --app-dir backend --reload --port 8080
 
-# Terminal 2: React/Vite console; open http://localhost:5173
+Copy-Item .env.example .env
+$env:MESSAGING_PROVIDER = "local"
+$env:STORAGE_BACKEND = "memory"
+$env:FACTS_PROVIDER = "deterministic"
+python -m uvicorn app.main:app --app-dir backend --reload --port 8080
+```
+
+In a second terminal:
+
+```powershell
 cd frontend
-npm install
+npm ci
 npm run dev
 ```
 
-## Workflow
+Open [http://localhost:5173](http://localhost:5173).
 
-```text
-REPORTED → TRIAGED → CONTAINED → DISPATCHING → SCHEDULED → IN_PROGRESS
-→ VERIFYING → PROVISIONALLY_RESOLVED → CLOSED
-                         ↘ ESCALATED / CANCELLED / REOPENED
-```
+## Live Telegram and Google Cloud setup
 
-Important invariants:
+The complete setup guide is in [docs/cloud-run.md](docs/cloud-run.md). It covers:
 
-- A report is idempotent by `Idempotency-Key` or a stable report key; event IDs are claimed before side effects. Notification, dispatch, Pub/Sub, Cloud Tasks, and timeline effects have deduplication keys.
-- Vendor ranking filters active, insured, in-region plumbing vendors. Vendor A decline/timeout invokes the next eligible vendor. A late Vendor A acceptance is recorded as ignored once Vendor B is assigned.
-- The synthetic Tampines property has a S$250 autonomous repair limit. A work order above the property limit becomes `ESCALATED` with a pending approval; safety escalation never silently expands spending authority.
-- Missing, mismatched, low-confidence, wrong-vendor, out-of-scope, or over-limit completion evidence blocks closure.
-- A closed incident recurs to `REOPENED` only while its warranty window is active; the original incident ID and timeline are preserved.
-- Non-terminal incidents are scanned and resumed on service startup.
+- Google Cloud APIs and resources
+- Runtime service-account permissions
+- Secret Manager configuration
+- The two-stage Cloud Run deployment
+- Telegram webhook registration
+- Tenant and vendor pairing
+- Post-deployment verification
 
-## Live control room
+Never commit `.env`, bot tokens, webhook secrets, API keys, or service-account keys.
 
-The primary console has three visible lanes for the selected incident:
+## Main safety and reliability rules
 
-- **Tenant conversation** shows tenant text, images, and voice notes, including a playable audio element and the persisted Gemini transcript.
-- **Agent decisions / state** shows the current state, structured assessment, property-specific containment, scheduler contacts, and deterministic rule outcomes.
-- **Vendor conversation** shows dispatch buttons/replies, fallback attempts, evidence photos, and invoice contacts.
+- Tenant, vendor, media, and invoice content is treated as untrusted input.
+- State transitions are checked against an explicit allow-list.
+- Event IDs and idempotency keys prevent duplicate side effects.
+- A late Vendor A response cannot replace Vendor B.
+- A quote over S$250 requires approval.
+- Missing, mismatched, low-confidence, wrong-vendor, or over-limit evidence cannot close an incident.
+- Non-terminal workflows are resumed after service restart.
+- Logs contain incident IDs, event IDs, state transitions, rule IDs, and outcomes, not model reasoning or unnecessary personal data.
 
-The append-only audit timeline is separate from those conversations. Each communication record carries sender, recipient, channel, timestamp, provider message ID when available, and delivery state. A live Telegram send is marked `sent` after Telegram accepts the API request; local/demo contacts are marked `simulated`. The console does not automatically invent ETA, work-start, completion, or tenant-confirm events in the primary experience. Those arrive from Telegram or an explicit backend event; use the replay button only for the deterministic scenario.
+## Verification
 
-## Architecture
-
-See [docs/architecture.md](docs/architecture.md), [docs/demo-script.md](docs/demo-script.md), and [docs/cloud-run.md](docs/cloud-run.md). The backend is under `backend/app/`, the React/Vite console under `frontend/`, and the deployment assets under `infra/` plus `Dockerfile`.
-
-## Telegram setup
-
-Create a bot with BotFather and keep the token only in a local, ignored `.env` file. The username is the BotFather username without `@`:
+With the development requirements installed:
 
 ```powershell
-Copy-Item .env.example .env
-# Edit .env and fill these values; do not commit .env.
-MESSAGING_PROVIDER=telegram
-TELEGRAM_BOT_TOKEN=<BotFather token>
-TELEGRAM_WEBHOOK_SECRET=<random secret>
-TELEGRAM_BOT_USERNAME=<username without @>
-TELEGRAM_DRAFT_EXPIRY_SECONDS=900
+.\.venv\Scripts\python.exe -m ruff check backend/app backend/tests
+.\.venv\Scripts\python.exe -m pytest backend/tests -q
+Push-Location backend
+..\.venv\Scripts\python.exe -m mypy app
+Pop-Location
+
+Push-Location frontend
+npm ci
+npm run lint
+npm test -- --run
+npm run build
+npx playwright test
+Pop-Location
 ```
 
-The webhook secret is sent to Telegram when the webhook is registered and is checked on every request at `X-Telegram-Bot-Api-Secret-Token`. Generate one locally if needed:
-
-```powershell
-python -c "import secrets; print(secrets.token_urlsafe(32))"
-```
-
-After the Cloud Run service is deployed, set `PUBLIC_BASE_URL` in `.env` or pass the URL explicitly. This command reads `.env`, calls Telegram `setWebhook`, then calls `getWebhookInfo` and fails if Telegram reports a different URL. It never prints the bot token or secret:
-
-```powershell
-$env:PYTHONPATH = "backend"
-python scripts/register_telegram_webhook.py --base-url "https://YOUR-CLOUD-RUN-SERVICE.run.app"
-```
-
-Pair a synthetic tenant or vendor with a real Telegram chat through a one-time, 15-minute deep-link code. Pairing codes and the resulting chat IDs are data in Firestore; bot credentials remain configuration secrets:
-
-```powershell
-$pairing = Invoke-RestMethod -Method Post `
-  -Uri "https://YOUR-CLOUD-RUN-SERVICE.run.app/api/telegram/pairing-codes" `
-  -ContentType "application/json" `
-  -Body '{"target_type":"vendor","target_id":"vendor-b"}'
-$pairing.deep_link
-```
-
-Open the returned link in Telegram, or send `/start <code>` to the bot. **Each Telegram user must send `/start` before the bot can send them messages.** The code is consumed exactly once and binds that chat to the selected record. Tenant conversation is deliberately explicit:
-
-```text
-/report
-<send any number of text messages, photos, videos, and voice notes>
-✅ Submit report        # creates exactly one incident
-➕ Add / edit items     # explains how to use the normal Telegram composer
-↩️ Undo last            # removes the latest draft item
-🗑 Cancel               # discards the draft
-
-/submit /undo /clear /cancel are also supported.
-```
-
-Every update produces a draft summary with text/photo/video/voice counts and a real expiry countdown. Drafts are persisted, expire after `TELEGRAM_DRAFT_EXPIRY_SECONDS`, and use Telegram `update_id`, message ID, file ID, and media-group ID so duplicate delivery cannot create another incident or duplicate media. The web console polls `/api/drafts` and shows the ordered pre-submit text/media with scoped media URLs and a pending-transcript label. After `/start`, the paired tenant receives containment and live status updates; delivery readiness is persisted with the tenant/vendor reference record. Gemini returns a schema-validated `ReportAssessment` with the faithful voice transcript when the Gemini provider is enabled; deterministic policy takes over for authorization.
-
-A paired vendor receives a bounded work order with session-bound inline **Accept job**/**Decline job** buttons. The paired Telegram group/chat is the vendor identity and authorization boundary; actions are additionally bound to the exact persisted vendor session, incident, and assigned vendor. After accepting, the bot separately collects and confirms the quote and arrival ETA, then shows a final review. Only **Submit quote and ETA** updates the incident and reveals **Start job**. Starting records arrival and shows **Prepare completion**; it does not prompt for evidence until the repair is finished. The legacy `PRICE 220 ETA 20` form is retained as a non-submitting draft compatibility path. Use `/status`, `/help`, `/price <amount>`, `/eta <minutes>`, `/complete`, and `/cancel` for recovery; group-qualified commands such as `/status@YourBot` work too. `/cancel` only clears an unsubmitted intake or completion draft and never releases an assignment. Completion photos create one conversation record per Telegram message. Over-limit final prices remain saved but cannot be submitted until manager approval.
-
-The completion wizard replaces the old manual caption flow. It requests one clear after-photo, a 10–500 character work summary, and an explicitly confirmed final price before showing **Submit completion**:
-
-```text
-COMPLETE
-PRICE 220
-SCOPE leak repair labor and replacement seal
-```
-
-The deterministic evidence gate checks the vendor photo, invoice scope, vendor identity, currency, confidence, and spending authority. After the compressed confirmation delay, the tenant receives **Dry now** or **Still leaking**. Dry now closes the original incident; Still leaking reopens that same incident only within its warranty window.
-
-For the simplest Cloud Run demo, pair `vendor-b`, submit the tenant report from Telegram, watch the visible Vendor A 8/12-second countdown expire, and show the Vendor B Telegram dispatch, acceptance, quote and ETA confirmation, final submission, Start job, completion wizard, and tenant confirmation. Cloud Run uses real wall-clock timestamps with compressed SLA durations. The deterministic replay is hidden in Cloud Run and is available only with local memory/local adapters; it advances the timeout explicitly so offline tests stay fast. Vendor A's late acceptance cannot replace Vendor B.
-
-The local/demo adapter remains the credential-free default when `TELEGRAM_BOT_TOKEN` is empty. It uses the same workflow and idempotency logic, but records messages locally instead of calling Telegram. The seeded catalog contains only synthetic chat IDs; never put a bot token, webhook secret, or Gemini key in Firestore or source control.
-
-## Cloud configuration
-
-Copy `.env.example` to `.env` and set `MESSAGING_PROVIDER=telegram`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`, `GEMINI_API_KEY`, `FACTS_PROVIDER=gemini`, `STORAGE_BACKEND=firestore`, `GOOGLE_CLOUD_PROJECT`, `GCS_BUCKET`, and ADC credentials. Keep `GEMINI_MODEL=gemini-3.5-flash` and `GOOGLE_GENAI_USE_VERTEXAI=false` for the Gemini API path; there is no older-model fallback. The early smoke test and live contract test use the exact model and assert structured fields, not wording:
+The optional live Gemini contract check uses the configured `GEMINI_API_KEY` and the exact `gemini-3.5-flash` model:
 
 ```powershell
 $env:PYTHONPATH = "backend"
@@ -144,24 +157,23 @@ $env:LIVE_GEMINI_TEST = "1"
 python -m pytest backend/tests/contract -q
 ```
 
-If `GEMINI_API_KEY` is missing or invalid, the deterministic adapter remains the local/demo path; the app does not silently substitute another Gemini model. Do not put real tenant/vendor data or production credentials in this demo. Never commit `.env`.
+## Repository map
 
-To seed the single synthetic property and the Telegram chat IDs into Firestore (chat IDs are data, not secrets):
-
-```powershell
-$env:PYTHONPATH = "backend"
-python -m app.seed_data
+```text
+backend/app/        workflow, policies, adapters, persistence, Telegram webhook
+backend/tests/      unit, integration, and optional live contract tests
+frontend/src/       live incident control room
+frontend/tests/     UI and Playwright tests
+docs/               architecture, deployment, security, and demo notes
+infra/              local HTTP smoke test
+scripts/            Telegram webhook registration
+Dockerfile          single Cloud Run image for API and frontend
 ```
 
-## Verification
+## Additional documentation
 
-```powershell
-python -m ruff check backend/app backend/tests
-python -m mypy backend/app
-python -m pytest backend/tests -q
-cd frontend; npm run lint; npm test -- --run; npm run build
-cd frontend; npx playwright test
-docker build -t no-more-buckets:local .
-```
-
-If host dependencies are absent, run the commands in a Python/Node container or use the Docker build; no system package installation is required. `infra/smoke.ps1` checks `/api/health`, `/api/demo/seed`, and `/api/runtime`.
+- [Architecture and trust boundaries](docs/architecture.md)
+- [Cloud Run and Telegram setup](docs/cloud-run.md)
+- [Short demo flow](docs/demo-script.md)
+- [Security and data handling](docs/security.md)
+- [Submission summary](docs/submission.md)
