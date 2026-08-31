@@ -167,6 +167,9 @@
 
 ## [OUTCOMES]
 
+- 2026-09-01T06:56+08:00 [USER] Purged `AGENTS.md` from the complete published Git history and retained only an ignored local working copy.
+- 2026-09-01T06:56+08:00 [TOOL] Rewrote and force-pushed all 33 commits on `main`; author dates, commit dates, authors, messages, ordering, and commit count are identical to the prior history. The remote exposes only rewritten `main`, and `git log main -- AGENTS.md` is empty.
+
 - 2026-09-01T03:25:00+08:00 [USER] Authorized another clean-slate reset and requested a much shorter step-by-step recording script.
 - 2026-09-01T03:25:00+08:00 [TOOL] Removed sole active synthetic incident `inc_3e4fcb5da478`, related vendor session `vs_e97cf7e772f449778d81`, and pending Vendor B timeout `vendor-timeout-1b520b9632c5f97424b614a9`; public incident API returns `[]`.
 
